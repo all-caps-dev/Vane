@@ -4,9 +4,33 @@ import { classify } from './classifier';
 import Researcher from './researcher';
 import { getWriterPrompt } from '@/lib/prompts/search/writer';
 import { WidgetExecutor } from './widgets';
+import { getTokenCount } from '@/lib/utils/splitText';
+import { Tracer } from '@/lib/trace';
+import { startRequestTrace, traceAnswer, traceSources } from './trace';
 
 class APISearchAgent {
+  /* Wraps the pipeline so the request trace is always finished, even when
+     the pipeline throws. The error is re-thrown unchanged. */
   async searchAsync(session: SessionManager, input: SearchAgentInput) {
+    const tracer = startRequestTrace(session, input, 'api');
+
+    try {
+      await this.runSearch(session, input, tracer);
+    } catch (err) {
+      tracer.error('searchAsync', err);
+      throw err;
+    } finally {
+      void tracer.finish();
+    }
+  }
+
+  private async runSearch(
+    session: SessionManager,
+    input: SearchAgentInput,
+    tracer: Tracer,
+  ) {
+    const classifySpan = tracer.span('classify');
+
     const classification = await classify({
       chatHistory: input.chatHistory,
       enabledSources: input.config.sources,
@@ -14,21 +38,42 @@ class APISearchAgent {
       llm: input.config.llm,
     });
 
+    classifySpan.end({
+      ...classification.classification,
+      standaloneFollowUp: tracer.content(classification.standaloneFollowUp),
+    });
+
+    const widgetSpan = tracer.span('widgets');
+
     const widgetPromise = WidgetExecutor.executeAll({
       classification,
       chatHistory: input.chatHistory,
       followUp: input.followUp,
       llm: input.config.llm,
-    }).catch((err) => {
-      console.error(`Error executing widgets: ${err}`);
-      return [];
-    });
+    })
+      .then((widgetOutputs) => {
+        widgetSpan.end({
+          count: widgetOutputs.length,
+          types: widgetOutputs.map((o) => o.type),
+        });
+        return widgetOutputs;
+      })
+      .catch((err) => {
+        console.error(`Error executing widgets: ${err}`);
+        widgetSpan.end({ count: 0, error: String(err) });
+        tracer.error('widgets', err);
+        return [];
+      });
 
     let searchPromise: Promise<ResearcherOutput> | null = null;
 
     if (!classification.classification.skipSearch) {
       const researcher = new Researcher();
-      searchPromise = researcher.research(SessionManager.createSession(), {
+      /* The researcher runs on its own session (as before); it shares this
+         request's tracer so its spans land in the same trace line. */
+      const researchSession = SessionManager.createSession();
+      researchSession.trace = tracer;
+      searchPromise = researcher.research(researchSession, {
         chatHistory: input.chatHistory,
         followUp: input.followUp,
         classification: classification,
@@ -47,6 +92,8 @@ class APISearchAgent {
         data: searchResults.searchFindings,
       });
     }
+
+    traceSources(tracer, searchResults?.searchFindings ?? []);
 
     session.emit('data', {
       type: 'researchComplete',
@@ -74,6 +121,15 @@ class APISearchAgent {
       input.config.mode,
     );
 
+    const writeStartedAt = Date.now();
+    const writeSpan = tracer.span('write', {
+      writerPromptTokens: tracer.enabled
+        ? getTokenCount(writerPrompt)
+        : undefined,
+    });
+    let answerText = '';
+    let timeToFirstChunkMs: number | undefined;
+
     const answerStream = input.config.llm.streamText({
       messages: [
         {
@@ -89,11 +145,24 @@ class APISearchAgent {
     });
 
     for await (const chunk of answerStream) {
+      /* Trace only: copy the streamed text; the stream itself is untouched. */
+      if (tracer.enabled) {
+        timeToFirstChunkMs ??= Date.now() - writeStartedAt;
+        answerText += chunk.contentChunk ?? '';
+      }
+
       session.emit('data', {
         type: 'response',
         data: chunk.contentChunk,
       });
     }
+
+    traceAnswer(tracer, writeSpan, {
+      answer: answerText,
+      writeStartedAt,
+      timeToFirstChunkMs,
+      sourceCount: searchResults?.searchFindings.length ?? 0,
+    });
 
     session.emit('end', {});
   }

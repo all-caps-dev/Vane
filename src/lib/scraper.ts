@@ -1,6 +1,7 @@
 import { JSDOM } from 'jsdom';
 import { Readability } from '@mozilla/readability';
 import { Mutex } from 'async-mutex';
+import type { Tracer } from './trace';
 
 class Scraper {
   private static browser: any | undefined;
@@ -48,7 +49,10 @@ class Scraper {
 
   static async scrape(
     url: string,
+    trace?: Tracer,
   ): Promise<{ content: string; title: string }> {
+    const startedAt = Date.now();
+
     await this.initBrowser();
 
     if (!this.browser) throw new Error('Browser not initialized');
@@ -87,6 +91,18 @@ class Scraper {
 
       const title = await page.title();
 
+      /* 'fetch' trace event: outcome is 'empty' when Readability found no text. */
+      if (trace?.enabled) {
+        const text = content?.textContent?.trim() ?? '';
+        trace.event('fetch', {
+          url,
+          title,
+          durationMs: Date.now() - startedAt,
+          outcome: text ? 'ok' : 'empty',
+          contentChars: text.length,
+        });
+      }
+
       return {
         content: `
         # ${title ?? 'No title'} - ${url}
@@ -96,6 +112,16 @@ class Scraper {
       };
     } catch (err) {
       console.log(`Error scraping ${url}:`, err);
+
+      if (trace?.enabled) {
+        trace.event('fetch', {
+          url,
+          durationMs: Date.now() - startedAt,
+          outcome: 'error',
+          contentChars: 0,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
 
       return {
         title: 'Failed to scrape',

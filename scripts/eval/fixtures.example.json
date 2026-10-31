@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "id": "f01",
+      "tags": ["stable-fact", "single-turn"],
+      "turns": ["What is the boiling point of water at sea level in Celsius?"],
+      "requiredFacts": ["100"],
+      "acceptableSourceDomains": ["wikipedia.org", "britannica.com"],
+      "freshness": "stable",
+      "expectAbstain": false,
+      "notes": "Placeholder. Simple fact; any reference source should do."
+    },
+    {
+      "id": "f02",
+      "tags": ["follow-up", "two-turn"],
+      "turns": [
+        "Who wrote the novel Frankenstein?",
+        "In what year was it first published?"
+      ],
+      "requiredFacts": ["1818"],
+      "acceptableSourceDomains": ["wikipedia.org", "britannica.com"],
+      "freshness": "stable",
+      "expectAbstain": false,
+      "notes": "Placeholder. Turn 2 depends on turn 1; only turn 2 is scored."
+    },
+    {
+      "id": "f03",
+      "tags": ["abstain"],
+      "turns": [
+        "What was the exact attendance at the 1803 Zorblaxian Lantern Festival in Quillmoor?"
+      ],
+      "requiredFacts": [],
+      "acceptableSourceDomains": [],
+      "freshness": "n/a",
+      "expectAbstain": true,
+      "notes": "Placeholder. Invented event; the answer should say it could not find information."
+    }
+  ]
+}
