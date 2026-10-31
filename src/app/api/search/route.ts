@@ -4,6 +4,7 @@ import SessionManager from '@/lib/session';
 import { ChatTurnMessage } from '@/lib/types';
 import { SearchSources } from '@/lib/agents/search/types';
 import APISearchAgent from '@/lib/agents/search/api';
+import { sanitizeCitations } from '@/lib/utils/sanitizeCitations';
 
 interface ChatRequestBody {
   optimizationMode: 'speed' | 'balanced' | 'quality';
@@ -51,20 +52,26 @@ export const POST = async (req: Request) => {
 
     const agent = new APISearchAgent();
 
-    agent.searchAsync(session, {
-      chatHistory: history,
-      config: {
-        embedding: embeddings,
-        llm: llm,
-        sources: body.sources,
-        mode: body.optimizationMode,
-        fileIds: [],
-        systemInstructions: body.systemInstructions || '',
-      },
-      followUp: body.query,
-      chatId: crypto.randomUUID(),
-      messageId: crypto.randomUUID(),
-    });
+    agent
+      .searchAsync(session, {
+        chatHistory: history,
+        config: {
+          embedding: embeddings,
+          llm: llm,
+          sources: body.sources,
+          mode: body.optimizationMode,
+          fileIds: [],
+          systemInstructions: body.systemInstructions || '',
+        },
+        followUp: body.query,
+        chatId: crypto.randomUUID(),
+        messageId: crypto.randomUUID(),
+      })
+      .catch((err) => {
+        /* The agent already emitted 'error' on the session (which ends the
+         response); this only stops the rejection from going unhandled. */
+        console.error('Search agent failed:', err);
+      });
 
     if (!body.stream) {
       return new Promise(
@@ -94,7 +101,12 @@ export const POST = async (req: Request) => {
             }
 
             if (event === 'end') {
-              resolve(Response.json({ message, sources }, { status: 200 }));
+              /* Drop [n] markers past the last source. Streaming clients get
+                 the raw chunks and are not corrected. */
+              const { text } = sanitizeCitations(message, sources.length);
+              resolve(
+                Response.json({ message: text, sources }, { status: 200 }),
+              );
             }
 
             if (event === 'error') {

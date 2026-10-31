@@ -8,6 +8,23 @@ import computeSimilarity from '@/lib/utils/computeSimilarity';
 import z from 'zod';
 import Scraper from '@/lib/scraper';
 import { splitText } from '@/lib/utils/splitText';
+import { normalizeUrl } from '@/lib/utils/normalizeUrl';
+
+/* Runs one SearXNG query. A failing query is recorded on the trace and
+   returns null, so the other queries of the same search still count. */
+const searchOrNull = async (
+  q: string,
+  opts: SearxngSearchOptions,
+  trace: InstanceType<typeof SessionManager>['trace'],
+) => {
+  try {
+    return await searchSearxng(q, opts, trace);
+  } catch (err) {
+    console.log(`SearXNG query failed for "${q}":`, err);
+    trace.error('search.query', err);
+    return null;
+  }
+};
 
 export const executeSearch = async (input: {
   queries: string[];
@@ -43,7 +60,7 @@ export const executeSearch = async (input: {
     const results: Chunk[] = [];
 
     const search = async (q: string) => {
-      const res = await searchSearxng(
+      const res = await searchOrNull(
         q,
         {
           ...(input.searchConfig ? input.searchConfig : {}),
@@ -51,42 +68,50 @@ export const executeSearch = async (input: {
         trace,
       );
 
+      if (!res) return;
+
       let resultChunks: Chunk[] = [];
 
-      /* 'embed' span: one query embedding plus one per result. */
+      /* 'embed' span: the query and every result in ONE embedText call. */
       const embedSpan = trace.span('embed', { query: q });
+      const embedStartedAt = Date.now();
 
       try {
-        const queryEmbedding = (await input.embedding.embedText([q]))[0];
+        const contents = res.results.map((r) => r.content || r.title);
+        // Index 0 is the query; index i + 1 is result i.
+        const embeddings = await input.embedding.embedText([q, ...contents]);
+        if (embeddings.length !== contents.length + 1) {
+          throw new Error(
+            `embedText returned ${embeddings.length} vectors for ${contents.length + 1} texts`,
+          );
+        }
+        const queryEmbedding = embeddings[0];
 
-        resultChunks = (
-          await Promise.all(
-            res.results.map(async (r) => {
-              const content = r.content || r.title;
-              const chunkEmbedding = (
-                await input.embedding.embedText([content])
-              )[0];
+        resultChunks = res.results
+          .map((r, i) => {
+            const chunkEmbedding = embeddings[i + 1];
 
-              return {
-                content,
-                metadata: {
-                  title: r.title,
-                  url: r.url,
-                  similarity: computeSimilarity(queryEmbedding, chunkEmbedding),
-                  embedding: chunkEmbedding,
-                },
-              };
-            }),
-          )
-        ).filter((c) => c.metadata.similarity > 0.5);
+            return {
+              content: contents[i],
+              metadata: {
+                title: r.title,
+                url: r.url,
+                similarity: computeSimilarity(queryEmbedding, chunkEmbedding),
+                embedding: chunkEmbedding,
+              },
+            };
+          })
+          .filter((c) => c.metadata.similarity > 0.5);
 
         embedSpan.end({
           count: res.results.length + 1,
+          durationMs: Date.now() - embedStartedAt,
           keptAboveThreshold: resultChunks.length,
         });
       } catch (err) {
         embedSpan.end({
           count: res.results.length + 1,
+          durationMs: Date.now() - embedStartedAt,
           error: err instanceof Error ? err.message : String(err),
         });
         trace.error('embed', err);
@@ -202,14 +227,21 @@ export const executeSearch = async (input: {
 
     const searchResults: Chunk[] = [];
 
+    let failedQueries = 0;
+
     const search = async (q: string) => {
-      const res = await searchSearxng(
+      const res = await searchOrNull(
         q,
         {
           ...(input.searchConfig ? input.searchConfig : {}),
         },
         trace,
       );
+
+      if (!res) {
+        failedQueries++;
+        return;
+      }
 
       let resultChunks: Chunk[] = [];
 
@@ -268,6 +300,11 @@ export const executeSearch = async (input: {
 
     await Promise.all(input.queries.map(search));
 
+    // Every query failed: nothing to pick from, so skip the picker LLM call.
+    if (input.queries.length > 0 && failedQueries === input.queries.length) {
+      return [];
+    }
+
     const pickerPrompt = `
       Assistant is an AI search result picker. Assistant's task is to pick 2-3 of the most relevant search results based off the query which can be then scraped for information to answer the query.
       Assistant will be shared with the search results retrieved from a search engine along with the queries used to retrieve those results. Assistant will then pick maxiumum 3 of the most relevant search results based on the queries and the content of the search results. Assistant should only pick search results that are relevant to the query and can help in answering the question.
@@ -321,18 +358,20 @@ export const executeSearch = async (input: {
       .map((i) => searchResults[i])
       .filter((r) => r !== undefined);
 
-    const alreadyExtractedURLs: string[] = [];
+    /* Normalised keys (normalizeUrl.ts) so ?utm_ variants, http/https and
+       trailing slashes of an already-read page are not read again. */
+    const alreadyExtractedURLs = new Set<string>();
 
     researchBlock.data.subSteps.forEach((step) => {
       if (step.type === 'reading') {
         step.reading.forEach((chunk) => {
-          alreadyExtractedURLs.push(chunk.metadata.url);
+          alreadyExtractedURLs.add(normalizeUrl(chunk.metadata.url));
         });
       }
     });
 
     const filteredResults = pickedResults.filter(
-      (r) => !alreadyExtractedURLs.find((url) => url === r.metadata.url),
+      (r) => !alreadyExtractedURLs.has(normalizeUrl(r.metadata.url)),
     );
 
     pickSpan.end({
