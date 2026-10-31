@@ -6,9 +6,14 @@ type TransformerConfig = {
   model: string;
 };
 
-class TransformerEmbedding extends BaseEmbedding<TransformerConfig> {
-  private pipelinePromise: Promise<FeatureExtractionPipeline> | null = null;
+/* One pipeline per model for the whole process. A TransformerEmbedding is
+   created for every request (ModelRegistry.loadEmbeddingModel), and before
+   this cache each instance loaded its own ONNX session (about 90 MB for
+   MiniLM) that was never freed: 30 requests took the server to 3.7 GB and
+   the OOM killer. */
+const pipelines = new Map<string, Promise<FeatureExtractionPipeline>>();
 
+class TransformerEmbedding extends BaseEmbedding<TransformerConfig> {
   constructor(protected config: TransformerConfig) {
     super(config);
   }
@@ -22,17 +27,22 @@ class TransformerEmbedding extends BaseEmbedding<TransformerConfig> {
   }
 
   private async embed(texts: string[]) {
-    if (!this.pipelinePromise) {
-      this.pipelinePromise = (async () => {
+    let pipelinePromise = pipelines.get(this.config.model);
+
+    if (!pipelinePromise) {
+      pipelinePromise = (async () => {
         const { pipeline } = await import('@huggingface/transformers');
         const result = await pipeline('feature-extraction', this.config.model, {
           dtype: 'fp32',
         });
         return result as FeatureExtractionPipeline;
       })();
+      pipelines.set(this.config.model, pipelinePromise);
+      // A failed load is forgotten so the next request can try again.
+      pipelinePromise.catch(() => pipelines.delete(this.config.model));
     }
 
-    const pipe = await this.pipelinePromise;
+    const pipe = await pipelinePromise;
     const output = await pipe(texts, { pooling: 'mean', normalize: true });
     return output.tolist() as number[][];
   }
