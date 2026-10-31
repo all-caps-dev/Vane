@@ -88,6 +88,30 @@ beforeEach(() => {
 });
 
 describe('executeSearch (speed)', () => {
+  it('shows a ranking step with the real selection counts (M3)', async () => {
+    searchSearxng.mockResolvedValue(
+      results(
+        ['Dogs', 'https://b.test/', 'about dogs'],
+        ['Cats', 'https://a.test/', 'about cat food'],
+      ),
+    );
+    settings.budget = 1;
+
+    const { promise, researchBlock } = run(['pets'], { question: 'cats' });
+    await promise;
+
+    expect(researchBlock.data.subSteps.map((s) => s.type)).toEqual([
+      'searching',
+      'search_results',
+      'ranking',
+    ]);
+    expect(researchBlock.data.subSteps[2]).toMatchObject({
+      candidates: 2,
+      selected: 1,
+      sources: 1,
+    });
+  });
+
   it('ranks snippets with one embedText call against the question', async () => {
     searchSearxng.mockResolvedValue(
       results(

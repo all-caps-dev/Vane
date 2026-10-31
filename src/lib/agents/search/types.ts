@@ -50,6 +50,21 @@ export type ClassifierInput = {
   chatHistory: ChatTurnMessage[];
 };
 
+// How time-sensitive the answer is (M3). 'recent' and 'current' narrow the
+// web search with SearXNG's time_range and allow a year in queries.
+export type Freshness = 'none' | 'recent' | 'current' | 'historical';
+
+// What kind of answer the user wants (M3).
+export type QueryIntent =
+  | 'fact'
+  | 'howto'
+  | 'comparison'
+  | 'troubleshooting'
+  | 'opinion'
+  | 'news'
+  | 'definition'
+  | 'other';
+
 export type ClassifierOutput = {
   classification: {
     skipSearch: boolean;
@@ -59,6 +74,11 @@ export type ClassifierOutput = {
     showWeatherWidget: boolean;
     showStockWidget: boolean;
     showCalculationWidget: boolean;
+    freshness: Freshness;
+    // Product names, versions, error strings and standards that search
+    // queries must keep exactly as written.
+    entities: string[];
+    intent: QueryIntent;
   };
   standaloneFollowUp: string;
 };
@@ -70,6 +90,8 @@ export type AdditionalConfig = {
   // The classifier's standalone question; search actions rank passages
   // against it (M2).
   question?: string;
+  // The classifier's output; web search reads freshness from it (M3).
+  classification?: ClassifierOutput;
 };
 
 export type ResearcherInput = {
@@ -86,6 +108,21 @@ export type ResearcherOutput = {
   searchFindings: Chunk[];
   // The same sources with their passages, for the writer context (M2).
   sources: SourceGroup[];
+  // What the evidence-gap round found (M3). Only set when that round ran
+  // (balanced and quality); the writer gets it as <evidence_notes>.
+  evidenceNotes?: EvidenceNotes;
+};
+
+// One missing piece of evidence named by the gap round (M3).
+export type EvidenceGap = {
+  what: string;
+  query: string;
+  purpose: string;
+};
+
+export type EvidenceNotes = {
+  gaps: EvidenceGap[];
+  conflicts: string[];
 };
 
 export type SearchActionOutput = {

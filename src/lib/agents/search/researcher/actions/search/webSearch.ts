@@ -2,92 +2,79 @@ import z from 'zod';
 import { ResearchAction } from '../../../types';
 import { ResearchBlock } from '@/lib/types';
 import { executeSearch } from './baseSearch';
+import {
+  MAX_QUERIES_PER_CALL,
+  normalizePlannedQueries,
+  plannedQuerySchema,
+  timeRangeFor,
+} from './queryPlan';
 
-const actionSchema = z.object({
+/* M3: each query carries the purpose it serves (see queryPlan.ts). The
+   older plain-string shape is still accepted at execute time. */
+export const webSearchSchema = z.object({
   type: z.literal('web_search'),
   queries: z
-    .array(z.string())
-    .describe('An array of search queries to perform web searches for.'),
+    .array(plannedQuerySchema)
+    .describe(
+      'One to three search queries, each with the purpose it serves. Use one query for a simple fact.',
+    ),
 });
 
+// Planning rules shared by every mode.
+const planningRules = `
+How to plan queries (each query is { "query": "...", "purpose": "..." }):
+- A simple fact needs ONE query. Use two or three only for a multipart or comparison question, and give each a different purpose.
+- Purposes: "primary" (the direct answer), "official_docs" (the vendor, project or standards body), "issues" (bug trackers, known problems, error reports), "independent" (third-party reviews, tests, benchmarks), "recent" (news and recent changes), "comparison_side" (one side of a comparison; use one per side).
+- Keep the entities listed in the user message exactly as written: product names, version numbers, error strings and standard identifiers. Do not round, expand or "fix" them.
+- Add a year to a query only when the freshness in the user message is "recent" or "current".
+- Never repeat a query listed under "Queries already run" in the user message; if you need more, search for what is still missing.
+- Write queries as a person would type them into a search engine: the key terms, not a full sentence and not a list of SEO keywords.
+
+Examples:
+- "Which success criteria were added in WCAG 2.2?" -> [{ "query": "WCAG 2.2 new success criteria", "purpose": "primary" }]
+- "Is Bun faster than Node for HTTP servers?" -> [{ "query": "Bun HTTP server benchmark", "purpose": "comparison_side" }, { "query": "Node.js HTTP server benchmark vs Bun", "purpose": "comparison_side" }, { "query": "Bun vs Node HTTP performance independent test", "purpose": "independent" }]
+- "Docker says ERR_SSL_PROTOCOL_ERROR after the update" -> [{ "query": "Docker \\"ERR_SSL_PROTOCOL_ERROR\\" after update", "purpose": "issues" }, { "query": "Docker release notes TLS change", "purpose": "official_docs" }]
+`;
+
 const speedModePrompt = `
-Use this tool to perform web searches based on the provided queries. This is useful when you need to gather information from the web to answer the user's questions. You can provide up to 3 queries at a time. You will have to use this every single time if this is present and relevant.
-You are currently on speed mode, meaning you would only get to call this tool once. Make sure to prioritize the most important queries that are likely to get you the needed information in one go.
-
-Your queries should be very targeted and specific to the information you need, avoid broad or generic queries.
-Your queries shouldn't be sentences but rather keywords that are SEO friendly and can be used to search the web for information.
-
-For example, if the user is asking about the features of a new technology, you might use queries like "GPT-5.1 features", "GPT-5.1 release date", "GPT-5.1 improvements" rather than a broad query like "Tell me about GPT-5.1".
-
-You can search for 3 queries in one go, make sure to utilize all 3 queries to maximize the information you can gather. If a question is simple, then split your queries to cover different aspects or related topics to get a comprehensive understanding.
+Use this tool to search the web. You are in speed mode: you can call this tool only ONCE, so plan the queries that answer the question in one go.
+${planningRules}
 If this tool is present and no other tools are more relevant, you MUST use this tool to get the needed information.
 `;
 
 const balancedModePrompt = `
-Use this tool to perform web searches based on the provided queries. This is useful when you need to gather information from the web to answer the user's questions. You can provide up to 3 queries at a time. You will have to use this every single time if this is present and relevant.
-
-You can call this tool several times if needed to gather enough information.
-Start initially with broader queries to get an overview, then narrow down with more specific queries based on the results you receive.
-
-Your queries shouldn't be sentences but rather keywords that are SEO friendly and can be used to search the web for information.
-
-For example if the user is asking about Tesla, your actions should be like:
-1. __reasoning_preamble "The user is asking about Tesla. I will start with broader queries to get an overview of Tesla, then narrow down with more specific queries based on the results I receive." then
-2. web_search ["Tesla", "Tesla latest news", "Tesla stock price"] then
-3. __reasoning_preamble "Based on the previous search results, I will now narrow down my queries to focus on Tesla's recent developments and stock performance." then
-4. web_search ["Tesla Q2 2025 earnings", "Tesla new model 2025", "Tesla stock analysis"] then done.
-5. __reasoning_preamble "I have gathered enough information to provide a comprehensive answer."
-6. done.
-
-You can search for 3 queries in one go, make sure to utilize all 3 queries to maximize the information you can gather. If a question is simple, then split your queries to cover different aspects or related topics to get a comprehensive understanding.
-If this tool is present and no other tools are more relevant, you MUST use this tool to get the needed information. You can call this tools, multiple times as needed.
+Use this tool to search the web. You can call it more than once: after the first results, search again only for what is still missing.
+${planningRules}
+If this tool is present and no other tools are more relevant, you MUST use this tool to get the needed information.
 `;
 
 const qualityModePrompt = `
-Use this tool to perform web searches based on the provided queries. This is useful when you need to gather information from the web to answer the user's questions. You can provide up to 3 queries at a time. You will have to use this every single time if this is present and relevant.
-
-You have to call this tool several times to gather enough information unless the question is very simple (like greeting questions or basic facts).
-Start initially with broader queries to get an overview, then narrow down with more specific queries based on the results you receive.
-Never stop before at least 5-6 iterations of searches unless the user question is very simple.
-
-Your queries shouldn't be sentences but rather keywords that are SEO friendly and can be used to search the web for information.
-
-You can search for 3 queries in one go, make sure to utilize all 3 queries to maximize the information you can gather. If a question is simple, then split your queries to cover different aspects or related topics to get a comprehensive understanding.
-If this tool is present and no other tools are more relevant, you MUST use this tool to get the needed information. You can call this tools, multiple times as needed.
+Use this tool to search the web. You can call it several times. Each later call should target what earlier results did not cover (official documentation, known issues, independent sources, recent changes) rather than rephrasing the same search.
+${planningRules}
+If this tool is present and no other tools are more relevant, you MUST use this tool to get the needed information.
 `;
 
-const webSearchAction: ResearchAction<typeof actionSchema> = {
+const webSearchAction: ResearchAction<typeof webSearchSchema> = {
   name: 'web_search',
-  schema: actionSchema,
+  schema: webSearchSchema,
   getToolDescription: () =>
-    "Use this tool to perform web searches based on the provided queries. This is useful when you need to gather information from the web to answer the user's questions. You can provide up to 3 queries at a time. You will have to use this every single time if this is present and relevant.",
+    `Search the web. Takes "queries": up to ${MAX_QUERIES_PER_CALL} objects { query, purpose }. One query for a simple fact; two or three, each with a different purpose, for multipart or comparison questions. Keep product names, versions and error strings verbatim.`,
   getDescription: (config) => {
-    let prompt = '';
-
     switch (config.mode) {
-      case 'speed':
-        prompt = speedModePrompt;
-        break;
       case 'balanced':
-        prompt = balancedModePrompt;
-        break;
+        return balancedModePrompt;
       case 'quality':
-        prompt = qualityModePrompt;
-        break;
+        return qualityModePrompt;
+      case 'speed':
       default:
-        prompt = speedModePrompt;
-        break;
+        return speedModePrompt;
     }
-
-    return prompt;
   },
   enabled: (config) =>
     config.sources.includes('web') &&
     config.classification.classification.skipSearch === false,
   execute: async (input, additionalConfig) => {
-    input.queries = (
-      Array.isArray(input.queries) ? input.queries : [input.queries]
-    ).slice(0, 3);
+    const planned = normalizePlannedQueries(input.queries);
 
     const researchBlock = additionalConfig.session.getBlock(
       additionalConfig.researchBlockId,
@@ -95,14 +82,26 @@ const webSearchAction: ResearchAction<typeof actionSchema> = {
 
     if (!researchBlock) throw new Error('Failed to retrieve research block');
 
+    // Narrow the search to the last year or month when the answer is
+    // time-sensitive (classifier freshness).
+    const timeRange = timeRangeFor(
+      additionalConfig.classification?.classification.freshness,
+    );
+
+    additionalConfig.session.trace.event('search.plan', {
+      queries: planned,
+      timeRange,
+    });
+
     const results = await executeSearch({
       llm: additionalConfig.llm,
       embedding: additionalConfig.embedding,
       mode: additionalConfig.mode,
-      queries: input.queries,
+      queries: planned.map((q) => q.query),
       researchBlock: researchBlock,
       session: additionalConfig.session,
       question: additionalConfig.question,
+      searchConfig: timeRange ? { time_range: timeRange } : undefined,
     });
 
     return {
