@@ -19,6 +19,8 @@ export const executeSearch = async (input: {
   embedding: BaseEmbedding<any>;
 }) => {
   const researchBlock = input.researchBlock;
+  /* Per-request tracer; a no-op unless tracing is on. */
+  const trace = input.session.trace;
 
   researchBlock.data.subSteps.push({
     id: crypto.randomUUID(),
@@ -41,11 +43,18 @@ export const executeSearch = async (input: {
     const results: Chunk[] = [];
 
     const search = async (q: string) => {
-      const res = await searchSearxng(q, {
-        ...(input.searchConfig ? input.searchConfig : {}),
-      });
+      const res = await searchSearxng(
+        q,
+        {
+          ...(input.searchConfig ? input.searchConfig : {}),
+        },
+        trace,
+      );
 
       let resultChunks: Chunk[] = [];
+
+      /* 'embed' span: one query embedding plus one per result. */
+      const embedSpan = trace.span('embed', { query: q });
 
       try {
         const queryEmbedding = (await input.embedding.embedText([q]))[0];
@@ -70,7 +79,18 @@ export const executeSearch = async (input: {
             }),
           )
         ).filter((c) => c.metadata.similarity > 0.5);
+
+        embedSpan.end({
+          count: res.results.length + 1,
+          keptAboveThreshold: resultChunks.length,
+        });
       } catch (err) {
+        embedSpan.end({
+          count: res.results.length + 1,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        trace.error('embed', err);
+
         resultChunks = res.results.map((r) => {
           const content = r.content || r.title;
 
@@ -168,6 +188,13 @@ export const executeSearch = async (input: {
       })
       .slice(0, 20);
 
+    trace.event('dedup', {
+      stage: 'similarity',
+      before: results.length,
+      after: uniqueSearchResultIndices.size,
+      returned: uniqueSearchResults.length,
+    });
+
     return uniqueSearchResults;
   } else if (input.mode === 'quality') {
     const searchResultsBlockId = crypto.randomUUID();
@@ -176,9 +203,13 @@ export const executeSearch = async (input: {
     const searchResults: Chunk[] = [];
 
     const search = async (q: string) => {
-      const res = await searchSearxng(q, {
-        ...(input.searchConfig ? input.searchConfig : {}),
-      });
+      const res = await searchSearxng(
+        q,
+        {
+          ...(input.searchConfig ? input.searchConfig : {}),
+        },
+        trace,
+      );
 
       let resultChunks: Chunk[] = [];
 
@@ -269,6 +300,8 @@ export const executeSearch = async (input: {
         ),
     });
 
+    const pickSpan = trace.span('pick', { candidates: searchResults.length });
+
     const pickerResponse = await input.llm.generateObject<typeof pickerSchema>({
       schema: pickerSchema,
       messages: [
@@ -301,6 +334,12 @@ export const executeSearch = async (input: {
     const filteredResults = pickedResults.filter(
       (r) => !alreadyExtractedURLs.find((url) => url === r.metadata.url),
     );
+
+    pickSpan.end({
+      pickedCount: pickedResults.length,
+      alreadyReadCount: pickedResults.length - filteredResults.length,
+      urls: filteredResults.map((r) => r.metadata.url),
+    });
 
     if (filteredResults.length > 0) {
       researchBlock.data.subSteps.push({
@@ -365,11 +404,13 @@ export const executeSearch = async (input: {
     await Promise.all(
       filteredResults.map(async (result, i) => {
         try {
-          const scrapedData = await Scraper.scrape(result.metadata.url).catch(
-            (err) => {
-              console.log('Error scraping data from', result.metadata.url, err);
-            },
-          );
+          const scrapedData = await Scraper.scrape(
+            result.metadata.url,
+            trace,
+          ).catch((err) => {
+            console.log('Error scraping data from', result.metadata.url, err);
+            trace.error(`fetch ${result.metadata.url}`, err);
+          });
 
           if (!scrapedData) return;
 
@@ -377,7 +418,8 @@ export const executeSearch = async (input: {
           const chunks = splitText(scrapedData.content, 4000, 500);
 
           await Promise.all(
-            chunks.map(async (chunk) => {
+            chunks.map(async (chunk, chunkIndex) => {
+              const extractStartedAt = Date.now();
               try {
                 const extractorOutput = await input.llm.generateObject<
                   typeof extractorSchema
@@ -396,8 +438,23 @@ export const executeSearch = async (input: {
                 });
 
                 accumulatedContent += extractorOutput.extracted_facts + '\n';
+
+                trace.event('extract', {
+                  url: result.metadata.url,
+                  chunkIndex,
+                  durationMs: Date.now() - extractStartedAt,
+                  outputChars: extractorOutput.extracted_facts?.length ?? 0,
+                });
               } catch (err) {
                 console.log('Error extracting information from chunk', err);
+
+                trace.event('extract', {
+                  url: result.metadata.url,
+                  chunkIndex,
+                  durationMs: Date.now() - extractStartedAt,
+                  outputChars: 0,
+                  error: err instanceof Error ? err.message : String(err),
+                });
               }
             }),
           );
@@ -412,6 +469,7 @@ export const executeSearch = async (input: {
             result.metadata.url,
             err,
           );
+          trace.error(`read ${result.metadata.url}`, err);
         }
       }),
     );

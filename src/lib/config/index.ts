@@ -113,6 +113,17 @@ class ConfigManager {
         scope: 'server',
         env: 'SEARXNG_API_URL',
       },
+      {
+        name: 'Trace logging',
+        key: 'traceEnabled',
+        type: 'switch',
+        required: false,
+        description:
+          'Write one JSON line per request to data/traces (timings, queries, URLs, counts). Set VANE_TRACE=full to also record passages and the answer.',
+        default: false,
+        scope: 'server',
+        env: 'VANE_TRACE',
+      },
     ],
   };
 
@@ -228,6 +239,21 @@ class ConfigManager {
 
     /* search section */
     this.uiConfigSections.search.forEach((f) => {
+      if (f.env && f.type === 'switch') {
+        /* Switch fields hold a boolean. When the env var is set it decides the
+           value at startup ("1", "true" or "full" mean on, anything else off);
+           when it is not set the saved value is kept, or the default is used. */
+        const raw = process.env[f.env];
+        if (raw !== undefined && raw.trim() !== '') {
+          this.currentConfig.search[f.key] = ['1', 'true', 'full'].includes(
+            raw.trim().toLowerCase(),
+          );
+        } else if (this.currentConfig.search[f.key] === undefined) {
+          this.currentConfig.search[f.key] = f.default ?? false;
+        }
+        return;
+      }
+
       if (f.env && !this.currentConfig.search[f.key]) {
         this.currentConfig.search[f.key] =
           process.env[f.env] ?? f.default ?? '';

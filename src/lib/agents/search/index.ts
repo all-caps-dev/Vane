@@ -9,9 +9,30 @@ import { messages } from '@/lib/db/schema';
 import { and, eq, gt } from 'drizzle-orm';
 import { TextBlock } from '@/lib/types';
 import { getTokenCount } from '@/lib/utils/splitText';
+import { Tracer } from '@/lib/trace';
+import { startRequestTrace, traceAnswer, traceSources } from './trace';
 
 class SearchAgent {
+  /* Wraps the pipeline so the request trace is always finished, even when
+     the pipeline throws. The error is re-thrown unchanged. */
   async searchAsync(session: SessionManager, input: SearchAgentInput) {
+    const tracer = startRequestTrace(session, input, 'chat');
+
+    try {
+      await this.runSearch(session, input, tracer);
+    } catch (err) {
+      tracer.error('searchAsync', err);
+      throw err;
+    } finally {
+      void tracer.finish();
+    }
+  }
+
+  private async runSearch(
+    session: SessionManager,
+    input: SearchAgentInput,
+    tracer: Tracer,
+  ) {
     const exists = await db.query.messages.findFirst({
       where: and(
         eq(messages.chatId, input.chatId),
@@ -52,6 +73,8 @@ class SearchAgent {
         .execute();
     }
 
+    const classifySpan = tracer.span('classify');
+
     const classification = await classify({
       chatHistory: input.chatHistory,
       enabledSources: input.config.sources,
@@ -59,12 +82,24 @@ class SearchAgent {
       llm: input.config.llm,
     });
 
+    classifySpan.end({
+      ...classification.classification,
+      standaloneFollowUp: tracer.content(classification.standaloneFollowUp),
+    });
+
+    const widgetSpan = tracer.span('widgets');
+
     const widgetPromise = WidgetExecutor.executeAll({
       classification,
       chatHistory: input.chatHistory,
       followUp: input.followUp,
       llm: input.config.llm,
     }).then((widgetOutputs) => {
+      widgetSpan.end({
+        count: widgetOutputs.length,
+        types: widgetOutputs.map((o) => o.type),
+      });
+
       widgetOutputs.forEach((o) => {
         session.emitBlock({
           id: crypto.randomUUID(),
@@ -94,6 +129,8 @@ class SearchAgent {
       widgetPromise,
       searchPromise,
     ]);
+
+    traceSources(tracer, searchResults?.searchFindings ?? []);
 
     session.emit('data', {
       type: 'researchComplete',
@@ -125,6 +162,15 @@ class SearchAgent {
       input.config.mode,
     );
 
+    const writeStartedAt = Date.now();
+    const writeSpan = tracer.span('write', {
+      writerPromptTokens: tracer.enabled
+        ? getTokenCount(writerPrompt)
+        : undefined,
+    });
+    let answerText = '';
+    let timeToFirstChunkMs: number | undefined;
+
     const answerStream = input.config.llm.streamText({
       messages: [
         {
@@ -142,6 +188,12 @@ class SearchAgent {
     let responseBlockId = '';
 
     for await (const chunk of answerStream) {
+      /* Trace only: copy the streamed text; the stream itself is untouched. */
+      if (tracer.enabled) {
+        timeToFirstChunkMs ??= Date.now() - writeStartedAt;
+        answerText += chunk.contentChunk ?? '';
+      }
+
       if (!responseBlockId) {
         const block: TextBlock = {
           id: crypto.randomUUID(),
@@ -170,6 +222,13 @@ class SearchAgent {
         ]);
       }
     }
+
+    traceAnswer(tracer, writeSpan, {
+      answer: answerText,
+      writeStartedAt,
+      timeToFirstChunkMs,
+      sourceCount: searchResults?.searchFindings.length ?? 0,
+    });
 
     session.emit('end', {});
 

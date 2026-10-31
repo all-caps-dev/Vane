@@ -34,6 +34,14 @@ class Researcher {
         sources: input.config.sources,
       });
 
+    /* Per-request tracer; a no-op unless tracing is on. */
+    const trace = session.trace;
+    const researchSpan = trace.span('research', {
+      maxIteration,
+      tools: availableTools.map((t) => t.name),
+    });
+    let iterationsRun = 0;
+
     const researchBlockId = crypto.randomUUID();
 
     session.emitBlock({
@@ -64,6 +72,9 @@ class Researcher {
         maxIteration,
         input.config.fileIds,
       );
+
+      iterationsRun = i + 1;
+      const llmStartedAt = Date.now();
 
       const actionStream = input.config.llm.streamText({
         messages: [
@@ -147,6 +158,12 @@ class Researcher {
         }
       }
 
+      trace.event('research.iteration', {
+        iteration: i,
+        tools: finalToolCalls.map((tc) => tc.name),
+        llmMs: Date.now() - llmStartedAt,
+      });
+
       if (finalToolCalls.length === 0) {
         break;
       }
@@ -161,6 +178,8 @@ class Researcher {
         tool_calls: finalToolCalls,
       });
 
+      const actionsStartedAt = Date.now();
+
       const actionResults = await ActionRegistry.executeAll(finalToolCalls, {
         llm: input.config.llm,
         embedding: input.config.embedding,
@@ -171,6 +190,12 @@ class Researcher {
       });
 
       actionOutput.push(...actionResults);
+
+      trace.event('research.actions', {
+        iteration: i,
+        durationMs: Date.now() - actionsStartedAt,
+        outputCount: actionResults.length,
+      });
 
       actionResults.forEach((action, i) => {
         agentMessageHistory.push({
@@ -206,6 +231,18 @@ class Researcher {
         return result;
       })
       .filter((r) => r !== undefined);
+
+    trace.event('dedup', {
+      stage: 'url',
+      before: searchResults.length,
+      after: filteredSearchResults.length,
+    });
+
+    researchSpan.end({
+      iterations: iterationsRun,
+      findingsCount: actionOutput.length,
+      sourceCount: filteredSearchResults.length,
+    });
 
     session.emitBlock({
       id: crypto.randomUUID(),

@@ -77,6 +77,7 @@ Before committing changes:
 
 1. Ensure that your code functions correctly by thorough testing.
 2. Always run `npm run format:write` to format your code according to the project's coding standards. This helps maintain consistency and code quality.
+   Run `npm test` to run the unit tests (vitest); see `docs/EVAL.md` for tracing and the eval runner.
 3. We currently do not have a code of conduct, but it is in the works. In the meantime, please be mindful of how you engage with the project and its community.
 
 Following these steps will help maintain the integrity of Vane's codebase and facilitate a smoother integration of your valuable contributions. Thank you for your support and commitment to improving Vane.

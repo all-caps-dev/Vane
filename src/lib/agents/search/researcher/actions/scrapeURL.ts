@@ -75,11 +75,13 @@ const scrapeURLAction: ResearchAction<typeof schema> = {
     );
 
     const results: Chunk[] = [];
+    /* Per-request tracer; a no-op unless tracing is on. */
+    const trace = additionalConfig.session.trace;
 
     await Promise.all(
       params.urls.map(async (url) => {
         try {
-          const scraped = await Scraper.scrape(url);
+          const scraped = await Scraper.scrape(url, trace);
 
           if (
             !readingEmitted &&
@@ -151,7 +153,8 @@ const scrapeURLAction: ResearchAction<typeof schema> = {
           if (chunks.length > 1) {
             try {
               await Promise.all(
-                chunks.map(async (chunk) => {
+                chunks.map(async (chunk, chunkIndex) => {
+                  const extractStartedAt = Date.now();
                   const extracted = await additionalConfig.llm.generateObject<
                     typeof extractorSchema
                   >({
@@ -169,6 +172,13 @@ const scrapeURLAction: ResearchAction<typeof schema> = {
                   });
 
                   accumulatedContent += extracted.extracted_facts + '\n';
+
+                  trace.event('extract', {
+                    url,
+                    chunkIndex,
+                    durationMs: Date.now() - extractStartedAt,
+                    outputChars: extracted.extracted_facts?.length ?? 0,
+                  });
                 }),
               );
             } catch (err) {
@@ -176,6 +186,12 @@ const scrapeURLAction: ResearchAction<typeof schema> = {
                 'Error during extraction, falling back to raw content',
                 err,
               );
+              trace.event('extract', {
+                url,
+                outputChars: 0,
+                error: err instanceof Error ? err.message : String(err),
+                fallback: 'first chunk',
+              });
               accumulatedContent = chunks[0];
             }
           } else {
@@ -190,6 +206,7 @@ const scrapeURLAction: ResearchAction<typeof schema> = {
             },
           });
         } catch (error) {
+          trace.error(`scrape_url ${url}`, error);
           results.push({
             content: `Failed to fetch content from ${url}: ${error}`,
             metadata: {

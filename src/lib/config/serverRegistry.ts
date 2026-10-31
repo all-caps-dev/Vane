@@ -13,3 +13,14 @@ export const getConfiguredModelProviderById = (
 
 export const getSearxngURL = () =>
   configManager.getConfig('search.searxngURL', '');
+
+/* Trace mode for request tracing (see src/lib/trace.ts).
+   'off' unless the "Trace logging" switch is on; 'full' when it is on and
+   VANE_TRACE=full, which adds content (question, passages, answer). */
+export const getTraceMode = (): 'off' | 'on' | 'full' => {
+  const enabled = configManager.getConfig('search.traceEnabled', false);
+  if (enabled !== true && enabled !== 'true') return 'off';
+  return process.env.VANE_TRACE?.trim().toLowerCase() === 'full'
+    ? 'full'
+    : 'on';
+};
