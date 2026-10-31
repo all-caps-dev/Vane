@@ -175,6 +175,24 @@ class ConfigManager {
         scope: 'server',
         env: 'VANE_EVIDENCE_BUDGET',
       },
+      {
+        name: 'Model thinking for internal calls',
+        key: 'internalThinking',
+        type: 'select',
+        options: [
+          { name: 'Let the model think on every call', value: 'default' },
+          {
+            name: 'Skip thinking for the classifier, query planning and coverage check; the answer itself still thinks. Needs an OpenAI-compatible server that honours chat_template_kwargs.thinking, such as vLLM, SGLang or TensorFold.',
+            value: 'off',
+          },
+        ],
+        required: false,
+        description:
+          'Whether the classifier, query planning, coverage check and widgets may skip the model thinking step. The answer always keeps it.',
+        default: 'default',
+        scope: 'server',
+        env: 'VANE_INTERNAL_THINKING',
+      },
     ],
   };
 

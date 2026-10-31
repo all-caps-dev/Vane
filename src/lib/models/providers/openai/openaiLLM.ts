@@ -20,6 +20,19 @@ import {
 import { Message } from '@/lib/types';
 import { repairJson } from '@toolsycc/json-repair';
 
+/*
+  Extra request-body fields that turn the model's thinking off, or {} when
+  thinking is left alone. Servers such as vLLM, SGLang and TensorFold read
+  chat_template_kwargs.thinking for DeepSeek V4. Real OpenAI rejects unknown
+  body fields, so nothing is added unless the caller asked for 'off'.
+*/
+export const thinkingBody = (
+  options?: GenerateOptions,
+): { chat_template_kwargs?: { thinking: boolean } } =>
+  options?.thinking === 'off'
+    ? { chat_template_kwargs: { thinking: false } }
+    : {};
+
 type OpenAIConfig = {
   apiKey: string;
   model: string;
@@ -98,6 +111,8 @@ class OpenAILLM extends BaseLLM<OpenAIConfig> {
         this.config.options?.frequencyPenalty,
       presence_penalty:
         input.options?.presencePenalty ?? this.config.options?.presencePenalty,
+      // The SDK types do not know this key; the cast lets it through to the body.
+      ...(thinkingBody(input.options) as {}),
     });
 
     if (response.choices && response.choices.length > 0) {
@@ -155,6 +170,8 @@ class OpenAILLM extends BaseLLM<OpenAIConfig> {
         this.config.options?.frequencyPenalty,
       presence_penalty:
         input.options?.presencePenalty ?? this.config.options?.presencePenalty,
+      // The SDK types do not know this key; the cast lets it through to the body.
+      ...(thinkingBody(input.options) as {}),
       stream: true,
     });
 
@@ -210,6 +227,8 @@ class OpenAILLM extends BaseLLM<OpenAIConfig> {
       presence_penalty:
         input.options?.presencePenalty ?? this.config.options?.presencePenalty,
       response_format: zodResponseFormat(input.schema, 'object'),
+      // The SDK types do not know this key; the cast lets it through to the body.
+      ...(thinkingBody(input.options) as {}),
     });
 
     if (response.choices && response.choices.length > 0) {

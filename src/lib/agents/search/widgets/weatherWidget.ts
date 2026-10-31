@@ -1,6 +1,7 @@
 import z from 'zod';
 import { Widget } from '../types';
 import formatChatHistoryAsString from '@/lib/utils/formatHistory';
+import { getInternalThinking } from '@/lib/config/serverRegistry';
 
 const schema = z.object({
   location: z
@@ -67,6 +68,8 @@ const weatherWidget: Widget = {
         },
       ],
       schema,
+      // An internal call: may skip the model's thinking step (M4 setting).
+      options: { thinking: getInternalThinking() },
     });
 
     if (output.notPresent) {

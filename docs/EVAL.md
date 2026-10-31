@@ -169,6 +169,10 @@ New trace fields:
 - `research` span: `loopMs` (the loop alone, which the 60 s gap budget uses) and `queriesRun` (count).
 - `gap` event: when it ran, `covered`, `gapCount`, `conflictCount`, `queriesRun` (the gap queries actually searched), `newSources` and `durationMs`; when skipped, `skipped` (`mode`, `time` or `no_web`) and `researchMs`; when the check failed, `error: true`.
 
+## M4: model thinking for internal calls
+
+DeepSeek V4.1 Flash on TensorFold thinks before every reply, including the small structured calls that only steer the search; a classifier-shaped call measured 5.4 s with thinking and 1.2 s without. The server-scope setting **Model thinking for internal calls** (key `internalThinking`, environment variable `VANE_INTERNAL_THINKING`, default `default`) set to `off` adds `chat_template_kwargs: { thinking: false }` to the request body of the classifier, the researcher loop's tool-calling planner, the gap check and the weather, stock and calculation widgets; the writer's answer, and the legacy picker and extractor, still think. Only the OpenAI provider sends the field (in `generateText`, `streamText` and `generateObject`), and only when the setting is `off`, because real OpenAI rejects unknown body fields; use it with an OpenAI-compatible server that honours `chat_template_kwargs.thinking`, such as vLLM, SGLang or TensorFold. Like the other select settings, the environment variable applies only while no value is saved.
+
 ## Run the tests
 
 ```

@@ -6,6 +6,7 @@ import type { SearxngSearchOptions } from '@/lib/searxng';
 import type { Chunk, ResearchBlock } from '@/lib/types';
 import type { SourceGroup } from '@/lib/evidence';
 import { gapCheckPrompt } from '@/lib/prompts/search/gapCheck';
+import { getInternalThinking } from '@/lib/config/serverRegistry';
 import { formatResearchDigest } from './researcher/context';
 import {
   QUERY_PURPOSES,
@@ -134,6 +135,8 @@ export const runGapCheck = async (args: {
     // Parsed again here so an odd provider answer fails inside this try.
     const answer = await args.llm.generateObject<typeof gapCheckSchema>({
       schema: gapCheckSchema,
+      // An internal call: may skip the model's thinking step (M4 setting).
+      options: { thinking: getInternalThinking() },
       messages: [
         { role: 'system', content: gapCheckPrompt },
         {

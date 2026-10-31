@@ -1,5 +1,10 @@
 // TypeScript: unit tests for the one bounded evidence-gap round (M3) with a mocked LLM and search.
 import { describe, expect, it, vi } from 'vitest';
+
+// The real registry would read and write data/config.json.
+vi.mock('@/lib/config/serverRegistry', () => ({
+  getInternalThinking: () => 'default',
+}));
 import {
   formatEvidenceNotes,
   GAP_CHECK_BUDGET_MS,

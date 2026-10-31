@@ -2,6 +2,7 @@ import z from 'zod';
 import { ClassifierInput, ClassifierOutput } from './types';
 import { classifierPrompt } from '@/lib/prompts/search/classifier';
 import formatChatHistoryAsString from '@/lib/utils/formatHistory';
+import { getInternalThinking } from '@/lib/config/serverRegistry';
 
 export const FRESHNESS_VALUES = [
   'none',
@@ -87,6 +88,8 @@ export const classify = async (
       },
     ],
     schema: classifierSchema,
+    // An internal call: may skip the model's thinking step (M4 setting).
+    options: { thinking: getInternalThinking() },
   });
 
   // Drop blank entity strings and repeats; keep the model's order.

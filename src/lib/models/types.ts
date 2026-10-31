@@ -35,6 +35,9 @@ type GenerateOptions = {
   stopSequences?: string[];
   frequencyPenalty?: number;
   presencePenalty?: number;
+  /* 'off' asks the server to skip the model's thinking step for this call.
+     Only the OpenAI provider acts on it; the others ignore it. */
+  thinking?: 'default' | 'off';
 };
 
 type Tool = {
