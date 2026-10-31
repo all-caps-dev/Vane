@@ -7,6 +7,7 @@ import { WidgetExecutor } from './widgets';
 import { getTokenCount } from '@/lib/utils/splitText';
 import { Tracer, redactSecrets } from '@/lib/trace';
 import { startRequestTrace, traceAnswer, traceSources } from './trace';
+import { formatSourcesForWriter } from '@/lib/evidence';
 
 class APISearchAgent {
   /* Wraps the pipeline so the request trace is always finished, even when
@@ -104,13 +105,11 @@ class APISearchAgent {
       type: 'researchComplete',
     });
 
-    const finalContext =
-      searchResults?.searchFindings
-        .map(
-          (f, index) =>
-            `<result index=${index + 1} title=${f.metadata.title}>${f.content}</result>`,
-        )
-        .join('\n') || '';
+    /* One <source index=N> per source with its <passage>s inside, so [N]
+       keeps meaning "source N" (evidence.ts). */
+    const finalContext = searchResults
+      ? formatSourcesForWriter(searchResults.sources)
+      : '';
 
     const widgetContext = widgetOutputs
       .map((o) => {

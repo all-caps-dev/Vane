@@ -31,6 +31,9 @@ If you are not sure where to start, use this section as a map.
   - `src/lib/agents/search` contains the core chat and search pipeline.
   - `classifier.ts` decides whether research is needed and what should run.
   - `researcher/` gathers information in the background.
+  - `src/lib/evidence.ts` defines the evidence passage (stable source and chunk ids, snippet versus page text), selects passages within the budget, and builds the writer's source context.
+  - `src/lib/rerank/` holds the rerankers (in-process cross-encoder, embedding fallback) and picks the configured one.
+  - `src/lib/utils/chunkDocument.ts` splits fetched pages into section-aware passages.
 
 - **Add or change a search capability**
 

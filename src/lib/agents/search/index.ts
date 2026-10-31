@@ -12,6 +12,7 @@ import { getTokenCount } from '@/lib/utils/splitText';
 import { sanitizeCitations } from '@/lib/utils/sanitizeCitations';
 import { Tracer, redactSecrets } from '@/lib/trace';
 import { startRequestTrace, traceAnswer, traceSources } from './trace';
+import { formatSourcesForWriter } from '@/lib/evidence';
 
 class SearchAgent {
   /* Wraps the pipeline so the request trace is always finished, even when
@@ -146,12 +147,9 @@ class SearchAgent {
       '<Query to be answered without searching; Search not made>';
 
     if (searchResults) {
-      finalContext = searchResults?.searchFindings
-        .map(
-          (f, index) =>
-            `<result index=${index + 1} title=${f.metadata.title}>${f.content}</result>`,
-        )
-        .join('\n');
+      /* One <source index=N> per source with its <passage>s inside, so [N]
+         keeps meaning "source N" (evidence.ts). */
+      finalContext = formatSourcesForWriter(searchResults.sources);
     }
 
     const widgetContext = widgetOutputs

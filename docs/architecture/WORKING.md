@@ -46,6 +46,10 @@ Depending on configuration, research may include web lookup and searching user u
 
 When research needs the full text of a page, Vane first fetches it with a plain HTTP request (10 second timeout, at most 5 redirects, HTML or plain text only, at most 2 MB, no cookies) and extracts the readable text. The headless browser is started only when that request fails or the page has under 400 characters of readable text, which usually means it is built by JavaScript. Before anything is fetched, a guard resolves the host name and refuses the URL if any address is private: loopback, 10/8, 172.16/12, 192.168/16, link-local (including the 169.254.169.254 cloud metadata address), 100.64/10, IPv6 local ranges, and names ending in `.local`, `.internal` or `.ts.net`. The guard runs again on every redirect, and inside the browser every page and frame request is checked the same way, so a public page cannot redirect the fetcher onto the local network. A refused URL is reported as a failed read, never as an error.
 
+### Evidence
+
+Search results are turned into evidence before the answer is written. Every search result starts as a snippet. In speed mode the snippets are ranked against the question and the best are kept. In balanced and quality mode the top pages (6 or 10) are fetched and split along their headings into short passages; code blocks and tables are kept whole and every passage carries its section heading. A small cross-encoder model running on the CPU scores each passage against the question (falling back to embedding similarity if it cannot run), and a budget of passages is kept with a cap per page and a minimum number of different pages. Each passage has a stable id, and each is labelled as a page passage or a search snippet so the writer knows which is which. The writer sees passages grouped by page, and `[N]` in the answer refers to page N in the source list.
+
 ## Answer generation
 
 Once we have enough context, the chat model generates the final response.

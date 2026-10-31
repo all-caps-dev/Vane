@@ -5,7 +5,7 @@ import SessionManager from '@/lib/session';
 import { Message, ReasoningResearchBlock } from '@/lib/types';
 import formatChatHistoryAsString from '@/lib/utils/formatHistory';
 import { ToolCall } from '@/lib/models/types';
-import { normalizeUrl } from '@/lib/utils/normalizeUrl';
+import { groupBySource, sourceCard } from '@/lib/evidence';
 
 class Researcher {
   async research(
@@ -188,6 +188,7 @@ class Researcher {
         researchBlockId: researchBlockId,
         fileIds: input.config.fileIds,
         mode: input.config.mode,
+        question: input.classification.standaloneFollowUp || input.followUp,
       });
 
       actionOutput.push(...actionResults);
@@ -212,55 +213,38 @@ class Researcher {
       .filter((a) => a.type === 'search_results')
       .flatMap((a) => a.results);
 
-    /* Dedup by a normalised KEY (normalizeUrl.ts: no tracking params, no
-       fragment, http = https, no trailing slash). metadata.url keeps the
-       original link for display. */
-    const seenUrls = new Map<string, number>();
-
-    const filteredSearchResults = searchResults
-      .map((result, index) => {
-        const key = result.metadata.url
-          ? normalizeUrl(result.metadata.url)
-          : '';
-
-        if (key && !seenUrls.has(key)) {
-          seenUrls.set(key, index);
-          return result;
-        } else if (key && seenUrls.has(key)) {
-          const existingIndex = seenUrls.get(key)!;
-
-          const existingResult = searchResults[existingIndex];
-
-          existingResult.content += `\n\n${result.content}`;
-
-          return undefined;
-        }
-
-        return result;
-      })
-      .filter((r) => r !== undefined);
+    /* Group passages into sources (evidence.ts). The same chunkId from two
+       search actions is one passage; different chunks of one page stay
+       separate passages under one source. Sources are keyed by normalised
+       URL (no tracking params or fragment, http = https, no trailing
+       slash); metadata.url keeps the original link for display. */
+    const sources = groupBySource(searchResults);
+    const sourceCards = sources.map(sourceCard);
 
     trace.event('dedup', {
-      stage: 'url',
+      stage: 'source',
       before: searchResults.length,
-      after: filteredSearchResults.length,
+      passages: sources.reduce((n, s) => n + s.passages.length, 0),
+      after: sources.length,
     });
 
     researchSpan.end({
       iterations: iterationsRun,
       findingsCount: actionOutput.length,
-      sourceCount: filteredSearchResults.length,
+      sourceCount: sources.length,
     });
 
+    /* One entry per source, so the UI cards show pages, not passages. */
     session.emitBlock({
       id: crypto.randomUUID(),
       type: 'source',
-      data: filteredSearchResults,
+      data: sourceCards,
     });
 
     return {
       findings: actionOutput,
-      searchFindings: filteredSearchResults,
+      searchFindings: sourceCards,
+      sources,
     };
   }
 }

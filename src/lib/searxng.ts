@@ -10,7 +10,7 @@ export interface SearxngSearchOptions {
   safesearch?: 0 | 1 | 2;
 }
 
-interface SearxngSearchResult {
+export interface SearxngSearchResult {
   title: string;
   url: string;
   img_src?: string;
@@ -19,6 +19,10 @@ interface SearxngSearchResult {
   content?: string;
   author?: string;
   iframe_src?: string;
+  // Also in SearXNG's JSON; read by the evidence pipeline (M2).
+  engines?: string[];
+  engine?: string;
+  publishedDate?: string | null;
 }
 
 /*
