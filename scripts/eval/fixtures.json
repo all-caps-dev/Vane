@@ -1,0 +1,505 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-11-01",
+  "fixtures": [
+    {
+      "id": "f01",
+      "tags": ["simple_fact", "version_sensitive"],
+      "turns": [
+        "What Debian release is Proxmox VE 9 based on, and when was Proxmox VE 9.0 released?"
+      ],
+      "requiredFacts": [
+        "Proxmox VE 9 is based on Debian 13 \"Trixie\"",
+        "Proxmox VE 9.0 was released in August 2025"
+      ],
+      "acceptableSourceDomains": [
+        "proxmox.com",
+        "pve.proxmox.com",
+        "forum.proxmox.com"
+      ],
+      "freshness": "historical",
+      "expectAbstain": false,
+      "notes": "Easy anchor fact. Bad answer: says Debian 12 Bookworm (that is PVE 8) or cites a homelab blog over the release notes."
+    },
+    {
+      "id": "f02",
+      "tags": ["technical_docs", "comparison", "conflicting_sources"],
+      "turns": [
+        "On Proxmox VE, should I run Docker inside an LXC container or a VM?"
+      ],
+      "requiredFacts": [
+        "The Proxmox VE admin guide's container chapter says nesting containers inside a Proxmox QEMU VM remains a recommended practice for use cases needing maximum isolation and live migration",
+        "LXC containers share the host kernel; Docker in an unprivileged LXC needs the nesting and keyctl features (the admin guide says keyctl is required to use docker inside a container)",
+        "Names the Proxmox Container Toolkit (pct) chapter of the Proxmox VE admin guide"
+      ],
+      "acceptableSourceDomains": ["pve.proxmox.com", "forum.proxmox.com"],
+      "freshness": "recent",
+      "expectAbstain": false,
+      "notes": "REWRITE NOTES (verified 2026-10-31): the docs no longer say a flat 'run Docker in a VM'; the current pct chapter scopes the VM recommendation to isolation and live migration, and PVE 9.1+ can create application containers from OCI images as a technology preview. Bad answer: picks a side with no mention of the official guidance, or claims Proxmox forbids Docker in LXC. Bonus: mentions OCI application containers (tech preview since 9.1)."
+    },
+    {
+      "id": "f03",
+      "tags": ["technical_docs"],
+      "turns": [
+        "Why doesn't Proxmox Backup Server free disk space right after I prune old backups?"
+      ],
+      "requiredFacts": [
+        "Prune only removes snapshot indexes; chunk space is reclaimed by garbage collection",
+        "Garbage collection marks in-use chunks (updates atime) then sweeps unreferenced chunks",
+        "Chunks newer than the cutoff (default 24 hours 5 minutes, or the start of the oldest running backup) are kept"
+      ],
+      "acceptableSourceDomains": ["pbs.proxmox.com", "forum.proxmox.com"],
+      "freshness": "none",
+      "expectAbstain": false,
+      "notes": "Tests reading deep docs. Bad answer: tells user to delete chunk files by hand or says prune frees space immediately."
+    },
+    {
+      "id": "f04",
+      "tags": ["followup", "technical_docs"],
+      "turns": [
+        "How do I expose a web app running on port 3000 to only my tailnet, over HTTPS, using Tailscale?",
+        "How is that different from making it reachable from the public internet?"
+      ],
+      "requiredFacts": [
+        "Turn 1: use tailscale serve (for example tailscale serve 3000); it is reachable only inside the tailnet",
+        "Turn 1: needs MagicDNS and HTTPS certificates enabled for the tailnet",
+        "Turn 2: Tailscale Funnel (tailscale funnel) is the public-internet option",
+        "Turn 2: Funnel only listens on ports 443, 8443 and 10000"
+      ],
+      "acceptableSourceDomains": ["tailscale.com"],
+      "freshness": "recent",
+      "expectAbstain": false,
+      "notes": "Turn 2 only makes sense with turn 1. Bad answer: turn 2 loses the serve context or uses pre-1.52 serve/funnel syntax (Tailscale says the CLI changed in client 1.52)."
+    },
+    {
+      "id": "f05",
+      "tags": ["technical_docs"],
+      "turns": [
+        "How does Caddy get a TLS certificate for a *.ts.net hostname?"
+      ],
+      "requiredFacts": [
+        "Caddy automatically fetches certificates for *.ts.net names from the local Tailscale daemon",
+        "HTTPS certificates must be enabled in the Tailscale admin console",
+        "If Caddy runs as a non-root user, tailscaled must permit it, for example via TS_PERMIT_CERT_UID"
+      ],
+      "acceptableSourceDomains": ["caddyserver.com", "tailscale.com"],
+      "freshness": "none",
+      "expectAbstain": false,
+      "notes": "Bad answer: tells user to run ACME DNS challenge against ts.net or to copy certs by hand from tailscale cert as the only way."
+    },
+    {
+      "id": "f06",
+      "tags": ["technical_docs", "version_sensitive"],
+      "turns": [
+        "On a UniFi Cloud Gateway Fiber, how do I send only one VLAN's traffic through a WireGuard VPN provider?"
+      ],
+      "requiredFacts": [
+        "Add the provider as a VPN Client (WireGuard or OpenVPN) in UniFi Network",
+        "Route that network through it with policy-based routing (Policy-Based Routes / Traffic Routes; the name depends on the Network app version), with the VLAN as the source",
+        "Mentions the kill switch option that blocks traffic when the tunnel is down"
+      ],
+      "acceptableSourceDomains": ["help.ui.com", "community.ui.com", "ui.com"],
+      "freshness": "recent",
+      "expectAbstain": false,
+      "notes": "NEEDS A HUMAN READ: help.ui.com blocked automated fetchers (HTTP 403 to WebFetch and curl on 2026-10-31), so none of the three facts were confirmed against the primary source. Judge with care and confirm the menu names on help.ui.com by hand. UI menus move between Network app versions. Search-index extracts of help.ui.com suggest Network 9.4 uses Settings > Policy Table > Create New Policy > Route and Network 9.3 uses Settings > Policy Engine > Policy-Based Routes; the WireGuard client article says to add a Traffic Route. Bad answer: describes old USG config.gateway.json or EdgeRouter CLI.",
+      "needsHumanCheck": true
+    },
+    {
+      "id": "f07",
+      "tags": ["comparison", "conflicting_sources"],
+      "turns": [
+        "Zigbee2MQTT or ZHA for Home Assistant: which one, and what does each need?"
+      ],
+      "requiredFacts": [
+        "Zigbee2MQTT needs an MQTT broker (for example Mosquitto) to talk to Home Assistant",
+        "ZHA is a built-in Home Assistant integration and needs no broker",
+        "Points to the zigbee2mqtt.io supported devices list for Zigbee2MQTT, notes that Home Assistant says there is no official ZHA compatibility list (it points to an unofficial community repository), and does not quote unsourced device counts"
+      ],
+      "acceptableSourceDomains": ["zigbee2mqtt.io", "home-assistant.io"],
+      "freshness": "recent",
+      "expectAbstain": false,
+      "notes": "Device-count claims conflict across blogs. Bad answer: invents a device count or ignores the broker requirement. zigbee2mqtt.io itself shows a live count (5798 devices / 608 vendors on 2026-10-31); quoting that with the link is fine."
+    },
+    {
+      "id": "f08",
+      "tags": ["technical_docs", "simple_fact"],
+      "turns": ["How do I get JSON results from the SearXNG search API?"],
+      "requiredFacts": [
+        "Add json to search.formats in settings.yml",
+        "Without it, a request with format=json returns HTTP 403 Forbidden"
+      ],
+      "acceptableSourceDomains": ["docs.searxng.org", "github.com"],
+      "freshness": "none",
+      "expectAbstain": false,
+      "notes": "Directly relevant to Vane's own stack. Bad answer: invents an API key setting or points at the old searx (not searxng) docs."
+    },
+    {
+      "id": "f09",
+      "tags": ["freshness_current", "version_sensitive"],
+      "turns": [
+        "What is the current stable release of TrueNAS Community Edition, and when did it come out?"
+      ],
+      "requiredFacts": [
+        "States a specific current version number and its release date, cited to truenas.com",
+        "Notes TrueNAS SCALE became TrueNAS Community Edition starting with 25.04 \"Fangtooth\"",
+        "Notes it is Debian Linux based"
+      ],
+      "acceptableSourceDomains": ["truenas.com", "forums.truenas.com"],
+      "freshness": "current",
+      "expectAbstain": false,
+      "notes": "Re-read the TrueNAS Software Status page (https://www.truenas.com/docs/softwarestatus/) before judging: both of the latest runs reported \"27 RC.1\", so check whether that release exists and whether the general-use recommendation has moved. On 2026-10-31 the general-use recommendation was 25.10.7 (2 September 2026) and TrueNAS 26 was still beta/RC; the page has had date oddities. Bad answer: names TrueNAS CORE 13 or SCALE 24.x as current, or calls a beta/RC the stable release."
+    },
+    {
+      "id": "f10",
+      "tags": ["conflicting_sources", "version_sensitive"],
+      "turns": ["How does Unraid licensing work?"],
+      "requiredFacts": [
+        "Current tiers are Starter, Unleashed and Lifetime (introduced 2024)",
+        "Starter and Unleashed include one year of updates; newer updates after that need a paid extension",
+        "Lifetime includes updates for life",
+        "Basic/Plus/Pro are labelled as legacy tiers, not current"
+      ],
+      "acceptableSourceDomains": ["unraid.net", "docs.unraid.net"],
+      "freshness": "recent",
+      "expectAbstain": false,
+      "notes": "Old Basic/Plus/Pro pages still rank high. Bad answer: presents Basic/Plus/Pro as what you buy today. On 2026-10-31: Starter $49 (6 devices), Unleashed $109, Lifetime $249, extension $36/yr."
+    },
+    {
+      "id": "f11",
+      "tags": ["likely_no_answer", "version_sensitive"],
+      "turns": ["What new features are in Proxmox VE 12?"],
+      "requiredFacts": [
+        "Says no Proxmox VE 12 release or roadmap entry was found",
+        "States the latest actual Proxmox VE release with its date"
+      ],
+      "acceptableSourceDomains": ["proxmox.com", "pve.proxmox.com"],
+      "freshness": "current",
+      "expectAbstain": true,
+      "notes": "Hallucination trap. Bad answer: lists PVE 8/9 features under the PVE 12 label. On 2026-10-31 the latest was Proxmox VE 9.2 (21 May 2026), plus a 9.2 arm64 build (5 August 2026)."
+    },
+    {
+      "id": "f12",
+      "tags": ["simple_fact", "version_sensitive"],
+      "turns": ["Which success criteria were added in WCAG 2.2?"],
+      "requiredFacts": [
+        "WCAG 2.2 became a W3C Recommendation on 5 October 2023",
+        "It adds 9 criteria: 2.4.11, 2.4.12, 2.4.13, 2.5.7, 2.5.8, 3.2.6, 3.3.7, 3.3.8, 3.3.9",
+        "4.1.1 Parsing was removed as obsolete"
+      ],
+      "acceptableSourceDomains": ["w3.org"],
+      "freshness": "historical",
+      "expectAbstain": false,
+      "notes": "Bad answer: counts 2.4.13 as AA, misses the 4.1.1 removal, or cites a vendor blog over w3.org/WAI. The current TR is an updated Recommendation dated 12 December 2024; 5 October 2023 is still the original 2.2 Recommendation date."
+    },
+    {
+      "id": "f13",
+      "tags": ["followup", "technical_docs"],
+      "turns": [
+        "What does WCAG 2.2 require for touch target size at Level AA?",
+        "What about the AAA version?"
+      ],
+      "requiredFacts": [
+        "Turn 1: 2.5.8 Target Size (Minimum), Level AA, 24 by 24 CSS pixels",
+        "Turn 1: lists the exceptions (spacing, equivalent, inline, user agent control, essential)",
+        "Turn 2: 2.5.5 Target Size (Enhanced), Level AAA, 44 by 44 CSS pixels",
+        "Turn 2: notes 2.5.5 dates from WCAG 2.1"
+      ],
+      "acceptableSourceDomains": ["w3.org"],
+      "freshness": "none",
+      "expectAbstain": false,
+      "notes": "Bad answer: gives 44px for AA, or turn 2 answers about platform guidelines (Apple 44pt, Material 48dp) instead of WCAG."
+    },
+    {
+      "id": "f14",
+      "tags": ["conflicting_sources", "technical_docs"],
+      "turns": ["Does WCAG 2.2 ban CAPTCHAs?"],
+      "requiredFacts": [
+        "No outright ban: 3.3.8 Accessible Authentication (Minimum), Level AA, forbids a cognitive function test unless an alternative, an assisting mechanism, or an exception applies",
+        "3.3.8 exceptions include object recognition and identifying non-text content the user supplied",
+        "3.3.9 Accessible Authentication (Enhanced), Level AAA, removes those two exceptions",
+        "Allowing paste and password managers is cited as a way to meet it"
+      ],
+      "acceptableSourceDomains": ["w3.org"],
+      "freshness": "none",
+      "expectAbstain": false,
+      "notes": "Many blogs claim a flat CAPTCHA ban. Bad answer: says yes, banned, or confuses AA and AAA."
+    },
+    {
+      "id": "f15",
+      "tags": ["technical_docs", "version_sensitive"],
+      "turns": [
+        "What ARIA roles and attributes does an editable combobox with a listbox popup need?"
+      ],
+      "requiredFacts": [
+        "role=combobox goes on the input element itself (ARIA 1.2 pattern)",
+        "Uses aria-expanded and aria-controls pointing at the popup (role=listbox)",
+        "aria-activedescendant marks the highlighted option while DOM focus stays on the input",
+        "Notes the ARIA 1.1 pattern (combobox wrapper owning a textbox) is superseded"
+      ],
+      "acceptableSourceDomains": ["w3.org"],
+      "freshness": "none",
+      "expectAbstain": false,
+      "notes": "Old StackOverflow answers show the ARIA 1.0/1.1 shapes. Bad answer: puts role=combobox on a wrapper div or uses aria-owns."
+    },
+    {
+      "id": "f16",
+      "tags": ["simple_fact", "technical_docs"],
+      "turns": [
+        "When did the European Accessibility Act start applying, and what standard is used to show conformance?"
+      ],
+      "requiredFacts": [
+        "Directive (EU) 2019/882 applies from 28 June 2025",
+        "Conformance is presumed for products and services that meet harmonised standards cited in the Official Journal; EN 301 549 is the relevant standard, and EN 301 549 V4.1.1 (September 2026) was written for the EAA but, until the Commission cites it in the Official Journal, it does not yet give presumption of conformity under the EAA",
+        "Microenterprises providing services are exempt",
+        "Services may keep using products already in use until 28 June 2030"
+      ],
+      "acceptableSourceDomains": [
+        "eur-lex.europa.eu",
+        "ec.europa.eu",
+        "etsi.org",
+        "accessible-eu-centre.ec.europa.eu",
+        "europa.eu"
+      ],
+      "freshness": "recent",
+      "expectAbstain": false,
+      "notes": "Bad answer: gives the 2019 adoption date as the start date, or says WCAG itself is the legal standard, or claims EN 301 549 V4.1.1 is already cited under the EAA without an Official Journal reference. Freshness changed historical -> recent: the OJ citation of V4.1.1 was expected around late 2026; re-check before each run. Added accessible-eu-centre.ec.europa.eu and europa.eu (Commission sites) as acceptable domains."
+    },
+    {
+      "id": "f17",
+      "tags": ["version_sensitive", "freshness_current"],
+      "turns": ["Which version of WCAG does Section 508 require today?"],
+      "requiredFacts": [
+        "The Revised 508 Standards (compliance from 18 January 2018) incorporate WCAG 2.0 Level A and AA by reference",
+        "Any claim that 508 now references WCAG 2.1 or 2.2 is backed by a cited Access Board final rule",
+        "Names the Access Board ICT standards page"
+      ],
+      "acceptableSourceDomains": ["access-board.gov", "section508.gov"],
+      "freshness": "current",
+      "expectAbstain": false,
+      "notes": "Vendors often say '508 means WCAG 2.1 AA'. Bad answer: asserts 2.1/2.2 with no rulemaking citation. As of 2026-10-31 no Access Board rule moves 508 past WCAG 2.0; the FY2027 budget justification lists no WCAG update. Do not confuse with DOJ's ADA Title II rule (WCAG 2.1 AA)."
+    },
+    {
+      "id": "f18",
+      "tags": ["ambiguous", "technical_docs"],
+      "turns": ["Are carousels accessible?"],
+      "requiredFacts": [
+        "Says it depends on implementation rather than a flat yes or no",
+        "Points to the WAI-ARIA APG Carousel pattern",
+        "Auto-rotating carousels need a pause/stop control under 2.2.2 Pause, Stop, Hide (movement that starts automatically, lasts more than 5 seconds, alongside other content)"
+      ],
+      "acceptableSourceDomains": ["w3.org"],
+      "freshness": "none",
+      "expectAbstain": false,
+      "notes": "Vague question. Bad answer: an opinion piece ('carousels are bad UX') with no criteria or pattern cited."
+    },
+    {
+      "id": "f19",
+      "tags": ["likely_no_answer"],
+      "turns": ["What does WCAG 2.2 success criterion 2.4.14 require?"],
+      "requiredFacts": [
+        "States WCAG 2.2 has no 2.4.14; guideline 2.4 ends at 2.4.13 Focus Appearance",
+        "Does not invent a requirement"
+      ],
+      "acceptableSourceDomains": ["w3.org"],
+      "freshness": "none",
+      "expectAbstain": true,
+      "notes": "Plausible-looking number trap. Bad answer: makes up a criterion or silently answers about 2.4.13."
+    },
+    {
+      "id": "f20",
+      "tags": ["simple_fact"],
+      "turns": [
+        "How much memory and memory bandwidth does an NVIDIA DGX Spark have?"
+      ],
+      "requiredFacts": [
+        "128 GB of unified LPDDR5x memory in the original configuration; notes NVIDIA added a 64 GB configuration (October 2026)",
+        "273 GB/s memory bandwidth",
+        "Built on the GB10 Grace Blackwell Superchip"
+      ],
+      "acceptableSourceDomains": ["nvidia.com", "docs.nvidia.com"],
+      "freshness": "recent",
+      "expectAbstain": false,
+      "notes": "Bad answer: quotes pre-launch rumour bandwidth or confuses Spark with DGX Station. Freshness changed none -> recent because a 64 GB model now exists."
+    },
+    {
+      "id": "f21",
+      "tags": ["followup", "comparison", "version_sensitive"],
+      "turns": [
+        "For running a 70B model locally, how does the current top Mac Studio compare to an NVIDIA DGX Spark?",
+        "What about two DGX Sparks linked together?"
+      ],
+      "requiredFacts": [
+        "Turn 1: names the current top Mac Studio chip as the M5 Ultra (Apple announced it on 25 August 2026), not the M3 Ultra",
+        "Turn 1: M5 Ultra memory bandwidth about 1.2 TB/s (M3 Ultra was 819 GB/s) vs Spark 273 GB/s",
+        "Turn 1: M5 Ultra configurable up to 512 GB unified memory; Spark comes with 128 GB (or 64 GB in the newer configuration)",
+        "Turn 2: two Sparks link over the built-in ConnectX-7 networking",
+        "Turn 2: NVIDIA says two linked 128 GB Sparks handle models up to about 400B parameters"
+      ],
+      "acceptableSourceDomains": [
+        "apple.com",
+        "nvidia.com",
+        "docs.nvidia.com",
+        "support.apple.com"
+      ],
+      "freshness": "recent",
+      "expectAbstain": false,
+      "notes": "Rewritten 2026-11-01 per the 2026-10-31 verification: Apple released Mac Studio with M5 Ultra (announced 25 Aug 2026; 1.2 TB/s, up to 512 GB, the 512 GB configuration due late Oct 2026), so M3 Ultra is no longer the current Mac Studio. An answer that compares the M3 Ultra (819 GB/s; launched configurable to 512 GB, now listed at 96 or 256 GB) and labels it the previous generation gets partial credit on turn 1. NVIDIA now says up to 400B for two Sparks, not 405B. Bad answer: presents the M3 Ultra as the current Mac Studio, turn 2 forgets the 70B framing, or confuses Spark with DGX Station."
+    },
+    {
+      "id": "f22",
+      "tags": ["comparison", "simple_fact"],
+      "turns": [
+        "RTX 5090 vs RTX 4090 for local LLM inference: VRAM, memory type and power?"
+      ],
+      "requiredFacts": [
+        "RTX 5090: 32 GB GDDR7, about 1.8 TB/s",
+        "RTX 4090: 24 GB GDDR6X, about 1.0 TB/s",
+        "Board power 575 W (5090) vs 450 W (4090)"
+      ],
+      "acceptableSourceDomains": ["nvidia.com"],
+      "freshness": "none",
+      "expectAbstain": false,
+      "notes": "Bad answer: gaming FPS benchmarks instead of memory specs, or 28 GB rumour figures for the 5090."
+    },
+    {
+      "id": "f23",
+      "tags": ["conflicting_sources", "technical_docs"],
+      "turns": [
+        "On a Ryzen AI Max+ 395 mini PC with 128 GB, how much memory can the iGPU use for LLMs?"
+      ],
+      "requiredFacts": [
+        "Supports up to 128 GB LPDDR5X-8000 on a 256-bit bus (about 256 GB/s)",
+        "On Windows, AMD Variable Graphics Memory can dedicate up to 96 GB to the GPU, and AMD says the iGPU can address about 112 GB total including shared memory",
+        "On Linux the GPU can address more through shared/GTT memory, so the practical limit differs by OS"
+      ],
+      "acceptableSourceDomains": [
+        "amd.com",
+        "rocm.docs.amd.com",
+        "github.com",
+        "kernel.org"
+      ],
+      "freshness": "recent",
+      "expectAbstain": false,
+      "notes": "Reviews quote 96 GB, 110 GB and 120 GB. Bad answer: gives one number with no OS distinction. Linux: GTT defaults to about 50% of RAM and is raised via the TTM pages_limit (AMD's amd-ttm tool); AMD recommends a small BIOS VRAM carve-out. Added rocm.docs.amd.com."
+    },
+    {
+      "id": "f24",
+      "tags": ["freshness_current"],
+      "turns": [
+        "What does an NVIDIA DGX Spark cost right now, and which configuration is that price for?"
+      ],
+      "requiredFacts": [
+        "States a current price with a dated NVIDIA source and names the configuration it applies to (128 GB Founders Edition or 64 GB partner unit)",
+        "Notes the Founders Edition launch price of $3,999 in October 2025 and the MSRP rise to $4,699 announced by NVIDIA in February 2026",
+        "Notes the 64 GB partner units, from $4,999 starting 23 October 2026"
+      ],
+      "acceptableSourceDomains": [
+        "nvidia.com",
+        "marketplace.nvidia.com",
+        "forums.developer.nvidia.com",
+        "blogs.nvidia.com"
+      ],
+      "freshness": "current",
+      "expectAbstain": false,
+      "notes": "Rewritten 2026-11-01 per the 2026-10-31 verification: the price moved at least twice ($3,999 launch; $4,699 MSRP from the 23 Feb 2026 announcement; 64 GB partner units from $4,999 on 23 Oct 2026). Press reports $6,950 for 128 GB on the NVIDIA Marketplace in Oct 2026, unverified because the marketplace page timed out. The grader must read marketplace.nvidia.com on run day. A price with no configuration named scores at most half on the first fact. Bad answer: quotes the pre-launch $2,999 \"Project DIGITS\" figure or the $3,999 launch price as today's price."
+    },
+    {
+      "id": "f25",
+      "tags": ["technical_docs", "version_sensitive"],
+      "turns": [
+        "In llama.cpp's llama-server, what do -ngl, -c and --jinja do?"
+      ],
+      "requiredFacts": [
+        "-ngl / --n-gpu-layers sets how many layers are offloaded to the GPU",
+        "-c / --ctx-size sets the context size",
+        "--jinja turns on the Jinja chat template engine (the model's own chat template), which tool calling relies on; it is now enabled by default and --no-jinja turns it off"
+      ],
+      "acceptableSourceDomains": ["github.com"],
+      "freshness": "recent",
+      "expectAbstain": false,
+      "notes": "Source must be the ggml-org/llama.cpp server README. Bad answer: uses old ./server or ./main binary names as current. Current defaults: -ngl auto (accepts a number, 'auto' or 'all'); -c 0 = take from the model."
+    },
+    {
+      "id": "f26",
+      "tags": ["comparison", "technical_docs"],
+      "turns": ["GGUF Q4_K_M vs IQ4_XS: which should I pick?"],
+      "requiredFacts": [
+        "Q4_K_M is a K-quant; IQ4_XS is an i-quant at about 4.25 bits per weight and smaller than Q4_K_M",
+        "I-quants are normally built with an importance matrix (imatrix)",
+        "I-quants can run slower on some backends, notably Apple Metal, because their non-linear values need a table lookup; on CPU IQ4_XS was about on par in the original benchmarks"
+      ],
+      "acceptableSourceDomains": ["github.com", "huggingface.co"],
+      "freshness": "none",
+      "expectAbstain": false,
+      "notes": "Bad answer: generic 'lower bits worse quality' with no K vs I distinction or imatrix mention."
+    },
+    {
+      "id": "f27",
+      "tags": ["freshness_current", "version_sensitive"],
+      "turns": [
+        "What is the latest Claude Code version and what changed in it?"
+      ],
+      "requiredFacts": [
+        "States a specific latest version number and its release date, with the date taken from the npm registry or a GitHub release (CHANGELOG.md headings carry no dates)",
+        "Cites the official changelog (CHANGELOG.md in anthropics/claude-code, or the Claude Code docs)"
+      ],
+      "acceptableSourceDomains": [
+        "github.com",
+        "code.claude.com",
+        "docs.claude.com",
+        "npmjs.com"
+      ],
+      "freshness": "current",
+      "expectAbstain": false,
+      "notes": "Grader checks npm on run day. On 2026-10-31 the npm latest tag was 2.1.316, published 2026-10-31T00:42:05Z. Bad answer: a months-old version from a news article."
+    },
+    {
+      "id": "f28",
+      "tags": ["technical_docs", "version_sensitive"],
+      "turns": [
+        "Can llama-server act as a reranker, and which endpoint does it expose?"
+      ],
+      "requiredFacts": [
+        "Yes, when started with --reranking (alias --rerank)",
+        "Endpoint POST /reranking, with aliases /rerank, /v1/rerank and /v1/reranking",
+        "Needs a reranker model in GGUF, for example bge-reranker-v2-m3"
+      ],
+      "acceptableSourceDomains": ["github.com", "huggingface.co"],
+      "freshness": "recent",
+      "expectAbstain": false,
+      "notes": "Bad answer: says llama.cpp only does embeddings, or invents a path such as /v1/rerankings (note /v1/reranking IS a real alias). The README also accepts --embedding --pooling rank instead of --reranking."
+    },
+    {
+      "id": "f29",
+      "tags": ["followup", "comparison"],
+      "turns": [
+        "What is the embedding dimension and max input length of BAAI/bge-m3?",
+        "How does nomic-embed-text v1.5 compare?"
+      ],
+      "requiredFacts": [
+        "bge-m3: 1024 dimensions, 8192 token max input",
+        "bge-m3 supports dense, sparse and multi-vector (ColBERT-style) retrieval",
+        "Turn 2: nomic-embed-text-v1.5 is 768 dimensions with Matryoshka truncation down to 64",
+        "Turn 2: nomic needs task prefixes such as search_query: and search_document:"
+      ],
+      "acceptableSourceDomains": ["huggingface.co", "arxiv.org"],
+      "freshness": "none",
+      "expectAbstain": false,
+      "notes": "Bad answer: turn 2 drops bge-m3 from the comparison, or confuses bge-m3 with bge-large-en (512 tokens). nomic v1.5 also takes 8192 tokens."
+    },
+    {
+      "id": "f30",
+      "tags": ["ambiguous"],
+      "turns": ["How much RAM does Spark need?"],
+      "requiredFacts": [
+        "Flags the ambiguity: Apache Spark vs NVIDIA DGX Spark (or asks which)",
+        "If it answers for Apache Spark, cites the spark.apache.org hardware provisioning guidance",
+        "Does not blend the two into one answer"
+      ],
+      "acceptableSourceDomains": ["spark.apache.org", "nvidia.com"],
+      "freshness": "none",
+      "expectAbstain": false,
+      "notes": "Bad answer: silently picks one meaning, or mixes executor memory advice with the DGX Spark memory figure (64 or 128 GB). Apache guidance: 8 GiB to hundreds of GB per machine, at most 75% to Spark, JVM above 200 GiB misbehaves."
+    }
+  ]
+}

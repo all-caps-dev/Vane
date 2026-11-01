@@ -22,7 +22,7 @@
       "acceptableSourceDomains": ["wikipedia.org", "britannica.com"],
       "freshness": "stable",
       "expectAbstain": false,
-      "notes": "Placeholder. Turn 2 depends on turn 1; only turn 2 is scored."
+      "notes": "Placeholder. Turn 2 depends on turn 1; facts are matched against both turns' answers."
     },
     {
       "id": "f03",

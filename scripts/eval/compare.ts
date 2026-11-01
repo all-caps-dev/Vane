@@ -7,12 +7,14 @@
 // plain JavaScript. No dependencies beyond Node itself.
 //
 // Optional judge file (--judge): JSONL, one line per (run, fixture) pair,
-// written by a person or a judging model after reading the answers:
+// written by a person or a judging model after reading the answers (the rules
+// a judging model follows are in scripts/eval/JUDGE.md):
 //   { "run": "<label>", "id": "f01", "factScore": 0.0-1.0,
-//     "unsupportedClaims": ["..."], "notes": "..." }
+//     "unsupportedClaims": ["..."], "citedWrongly": false, "notes": "..." }
 // - run: must match a --run label exactly (lines for unknown labels are ignored with a warning)
 // - factScore: 0 to 1, how much of the required facts the answer got right
 // - unsupportedClaims: claims the sources do not support; empty array when none
+// - citedWrongly: optional; true when the answer cites [n] with no sources
 // - notes: free text, shown in the per-fixture detail
 
 import fs from 'node:fs';
@@ -30,8 +32,10 @@ Options:
   --out <file.html>    Where to write the self-contained HTML page.
   --judge <file>       Optional JSONL of judgements, one line per run and fixture:
                        { "run": "<label>", "id": "f01", "factScore": 0.0-1.0,
-                         "unsupportedClaims": ["..."], "notes": "..." }
-  --help               Show this help
+                         "unsupportedClaims": ["..."], "citedWrongly": false,
+                         "notes": "..." }
+                       See scripts/eval/JUDGE.md for the judging rules.
+  --help              Show this help
 `;
 
 // ---------------------------------------------------------------------------
@@ -43,11 +47,21 @@ type Source = {
   metadata?: { url?: string; title?: string; [k: string]: unknown };
 };
 
+// One stored turn. Files written before turn storage hold plain question
+// strings in `turns` instead, so readers must accept both.
+type TurnRecord = {
+  question: string;
+  answer?: string;
+  sources?: Source[];
+  latencyMs?: number;
+};
+
 type ResultLine = {
   id: string;
   tags?: string[];
   mode?: string;
-  turns?: string[];
+  turns?: (string | TurnRecord)[];
+  needsHumanCheck?: boolean;
   expectAbstain?: boolean;
   latencyMs: number | null;
   turn1LatencyMs?: number;
@@ -75,6 +89,7 @@ type Judgement = {
   id: string;
   factScore: number;
   unsupportedClaims: string[];
+  citedWrongly?: boolean;
   notes?: string;
 };
 
@@ -220,6 +235,8 @@ const loadJudge = (file: string, labels: string[]): Map<string, Judgement> => {
       id: j.id,
       factScore: j.factScore,
       unsupportedClaims: (j.unsupportedClaims ?? []).map(String),
+      citedWrongly:
+        typeof j.citedWrongly === 'boolean' ? j.citedWrongly : undefined,
       notes: typeof j.notes === 'string' ? j.notes : undefined,
     });
   });
@@ -269,6 +286,18 @@ const secs = (ms: number | null | undefined, digits = 1): string =>
     : 'n/a';
 
 const isOk = (r: ResultLine) => !r.error;
+
+// The questions of a result line, from either turn shape.
+const turnQuestions = (r?: ResultLine): string[] =>
+  (r?.turns ?? []).map((t) =>
+    typeof t === 'string' ? t : String(t?.question ?? ''),
+  );
+
+// The stored turn records (with answers); empty for older files.
+const turnRecords = (r: ResultLine): TurnRecord[] =>
+  (r.turns ?? []).filter(
+    (t): t is TurnRecord => typeof t === 'object' && t !== null,
+  );
 
 const buildSummary = (
   runs: Run[],
@@ -483,9 +512,13 @@ const renderMatrix = (
   const baseline = runs[0];
 
   const rows = fixtureIds.map((id) => {
-    const tags = (
-      runs.map((r) => r.byId.get(id)).find((r) => r)?.tags ?? []
-    ).join(', ');
+    const first = runs.map((r) => r.byId.get(id)).find((r) => r);
+    const turnCount = turnQuestions(first).length;
+    // Tags, plus the turn count for multi-turn fixtures.
+    const tags = [
+      ...(first?.tags ?? []),
+      ...(turnCount > 1 ? [`${turnCount} turns`] : []),
+    ].join(', ');
     const cells = runs.map((run, runIndex) => {
       const r = run.byId.get(id);
       if (!r) {
@@ -548,6 +581,45 @@ ${rows.join('\n')}
 
 const PREVIEW_CHARS = 600;
 
+// A collapsed, numbered list of sources.
+const renderSources = (sources: Source[] | undefined): string => {
+  const items = (sources ?? [])
+    .map((s) => {
+      const href = safeHref(s.metadata?.url);
+      const text = escapeHtml(
+        s.metadata?.title || s.metadata?.url || '(untitled)',
+      );
+      return href
+        ? `<li><a href="${escapeHtml(href)}">${text}</a></li>`
+        : `<li>${text}</li>`;
+    })
+    .join('');
+  return items
+    ? `<details><summary>Sources (${sources?.length ?? 0})</summary><ol class="plain">${items}</ol></details>`
+    : '<p class="muted">No sources.</p>';
+};
+
+// Every turn before the last, each collapsed with its own answer and sources.
+// The last turn is the panel's main answer, so it is not repeated here.
+const renderEarlierTurns = (r: ResultLine): string => {
+  const records = turnRecords(r);
+  if (records.length < 2) return '';
+  return records
+    .slice(0, -1)
+    .map((t, i) => {
+      const answer = t.answer ?? '';
+      const meta = [
+        secs(t.latencyMs),
+        `${t.sources?.length ?? 0} sources`,
+        `${answer.length} chars`,
+      ].join(' · ');
+      return `<details class="turn"><summary>Turn ${i + 1} answer <span class="muted">(${escapeHtml(meta)})</span></summary>
+<p class="muted">Q: ${escapeHtml(t.question)}</p>
+<pre>${escapeHtml(answer)}</pre>${renderSources(t.sources)}</details>`;
+    })
+    .join('\n');
+};
+
 const renderDetail = (
   runs: Run[],
   fixtureIds: string[],
@@ -556,12 +628,13 @@ const renderDetail = (
   fixtureIds
     .map((id) => {
       const any = runs.map((r) => r.byId.get(id)).find((r) => r);
-      const turns = any?.turns ?? [];
+      const turns = turnQuestions(any);
       const question = turns.length
         ? turns
             .map((t, i) => (turns.length > 1 ? `Turn ${i + 1}: ${t}` : t))
             .join(' / ')
         : '';
+      const turnNote = turns.length > 1 ? ` (${turns.length} turns)` : '';
 
       const panels = runs.map((run) => {
         const r = run.byId.get(id);
@@ -577,13 +650,17 @@ const renderDetail = (
         const facts = r.requiredFacts
           ? `facts ${r.requiredFacts.hits}/${r.requiredFacts.total}`
           : '';
+        const turnCount = turnQuestions(r).length;
         const meta = [
+          turnCount > 1 ? `${turnCount} turns` : '',
           secs(r.latencyMs),
           `${r.sourceCount ?? 0} sources`,
           `${r.citations?.outOfRangeCount ?? 0} out of range`,
           r.abstained ? 'abstained' : '',
           facts,
           j ? `judged ${fmt(j.factScore, 2)}` : '',
+          j?.citedWrongly ? 'cited wrongly' : '',
+          r.needsHumanCheck ? 'needs human check' : '',
         ]
           .filter(Boolean)
           .join(' · ');
@@ -593,20 +670,12 @@ const renderDetail = (
             ? `<details><summary>Full answer (${answer.length} chars)</summary><pre>${escapeHtml(answer)}</pre></details>`
             : '';
 
-        const sources = (r.sources ?? [])
-          .map((s) => {
-            const href = safeHref(s.metadata?.url);
-            const text = escapeHtml(
-              s.metadata?.title || s.metadata?.url || '(untitled)',
-            );
-            return href
-              ? `<li><a href="${escapeHtml(href)}">${text}</a></li>`
-              : `<li>${text}</li>`;
-          })
-          .join('');
-        const sourceBlock = sources
-          ? `<details><summary>Sources (${r.sources?.length ?? 0})</summary><ol class="plain">${sources}</ol></details>`
-          : '<p class="muted">No sources.</p>';
+        // With stored turns, earlier answers sit above the final one, which
+        // is labelled so it is clear the preview is the last turn.
+        const earlier = renderEarlierTurns(r);
+        const finalLabel = earlier
+          ? `<p class="muted">Turn ${turnCount} answer (final):</p>`
+          : '';
 
         const judgeBlock = j
           ? `<div class="judge">${
@@ -618,11 +687,11 @@ const renderDetail = (
 
         return `<section class="panel"><h3>${runHeading(run)}</h3>
 <p class="muted">${escapeHtml(meta)}</p>
-<p class="answer">${escapeHtml(answer.slice(0, PREVIEW_CHARS))}${answer.length > PREVIEW_CHARS ? '…' : ''}</p>
-${full}${sourceBlock}${judgeBlock}</section>`;
+${earlier}${finalLabel}<p class="answer">${escapeHtml(answer.slice(0, PREVIEW_CHARS))}${answer.length > PREVIEW_CHARS ? '…' : ''}</p>
+${full}${renderSources(r.sources)}${judgeBlock}</section>`;
       });
 
-      return `<details class="fixture"><summary><strong>${escapeHtml(id)}</strong> ${escapeHtml(question)}</summary>
+      return `<details class="fixture"><summary><strong>${escapeHtml(id)}</strong>${escapeHtml(turnNote)} ${escapeHtml(question)}</summary>
 <div class="panels">${panels.join('\n')}</div></details>`;
     })
     .join('\n');
@@ -680,6 +749,7 @@ const renderHtml = (
   .panel { border: 1px solid #ddd; border-radius: 6px; padding: .75rem; min-width: 0; }
   .answer { white-space: pre-wrap; word-wrap: break-word; }
   .judge { margin-top: .5rem; font-size: .9rem; }
+  details.turn { border-left: 3px solid #bbb; padding-left: .5rem; margin: .25rem 0 .5rem; }
   pre { white-space: pre-wrap; word-wrap: break-word; background: #f7f7f7; padding: .5rem; }
   ol.plain { padding-left: 1.25rem; word-break: break-all; font-size: .9rem; }
   @media (prefers-color-scheme: dark) {

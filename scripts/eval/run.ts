@@ -28,8 +28,9 @@ Options:
   --help                   Show this help
 
 Writes <out>/results-<mode>-<stamp>.jsonl and <out>/summary-<mode>-<stamp>.html.
-Fixture schema: { version, fixtures: [{ id, tags, turns (1 or 2), requiredFacts,
-acceptableSourceDomains, freshness, expectAbstain, notes }] }
+Fixture schema: { version, fixtures: [{ id, tags, turns (1 or more), requiredFacts,
+acceptableSourceDomains, freshness, expectAbstain, notes, needsHumanCheck? }] }
+Every turn's answer is stored; required facts are matched against all turns.
 `;
 
 type Mode = 'speed' | 'balanced' | 'quality';
@@ -43,6 +44,9 @@ type Fixture = {
   freshness?: unknown;
   expectAbstain: boolean;
   notes?: string;
+  // True when a fact could not be checked against its primary source and a
+  // person should confirm the judgement by hand.
+  needsHumanCheck: boolean;
 };
 
 type ModelRef = { providerId: string; key: string };
@@ -190,8 +194,8 @@ const loadFixtures = (file: string): Fixture[] => {
     if (!f || typeof f.id !== 'string') {
       throw new Error(`Fixture #${i + 1} has no string id`);
     }
-    if (!Array.isArray(f.turns) || f.turns.length < 1 || f.turns.length > 2) {
-      throw new Error(`Fixture ${f.id}: turns must have 1 or 2 strings`);
+    if (!Array.isArray(f.turns) || f.turns.length < 1) {
+      throw new Error(`Fixture ${f.id}: turns must have at least 1 string`);
     }
     return {
       id: f.id,
@@ -204,6 +208,7 @@ const loadFixtures = (file: string): Fixture[] => {
       freshness: f.freshness,
       expectAbstain: f.expectAbstain === true,
       notes: typeof f.notes === 'string' ? f.notes : undefined,
+      needsHumanCheck: f.needsHumanCheck === true,
     };
   });
 };
@@ -320,6 +325,15 @@ const hostnameOf = (url?: string): string => {
   }
 };
 
+// One turn of a fixture as stored in the results line. A turn that never ran
+// (an earlier turn errored) has only its question.
+type TurnRecord = {
+  question: string;
+  answer?: string;
+  sources?: Source[];
+  latencyMs?: number;
+};
+
 const runFixture = async (
   args: Args,
   models: { chatModel: ModelRef; embeddingModel: ModelRef },
@@ -329,36 +343,48 @@ const runFixture = async (
     id: fixture.id,
     tags: fixture.tags,
     mode: args.mode,
-    turns: fixture.turns,
     expectAbstain: fixture.expectAbstain,
+    // Only written when set, so ordinary lines stay the same shape as before.
+    ...(fixture.needsHumanCheck ? { needsHumanCheck: true } : {}),
   };
 
-  try {
-    let history: [string, string][] = [];
-    let turn1LatencyMs: number | undefined;
+  // Filled in as each turn finishes, so an error part-way through still
+  // records the turns that did run.
+  const done: TurnRecord[] = [];
 
-    // Two-turn fixtures: run turn 1, feed its answer back as history, and
-    // score turn 2 only.
-    if (fixture.turns.length === 2) {
-      const first = await askOnce(args, models, fixture.turns[0], []);
-      turn1LatencyMs = first.latencyMs;
-      history = [
-        ['human', fixture.turns[0]],
-        ['assistant', first.message],
-      ];
+  try {
+    // Ask every turn in order, feeding each earlier question and answer back
+    // as history, the way the chat UI does.
+    let history: [string, string][] = [];
+    for (const question of fixture.turns) {
+      const reply = await askOnce(args, models, question, history);
+      done.push({
+        question,
+        answer: reply.message,
+        sources: reply.sources,
+        latencyMs: reply.latencyMs,
+      });
+      history = [...history, ['human', question], ['assistant', reply.message]];
     }
 
-    const scored = await askOnce(
-      args,
-      models,
-      fixture.turns[fixture.turns.length - 1],
-      history,
-    );
+    // The top-level answer, sources, latency and citation stats describe the
+    // final turn, as they always have, so compare.ts and older readers work.
+    const final = done[done.length - 1];
+    const scored = {
+      message: final.answer ?? '',
+      sources: final.sources ?? [],
+      latencyMs: final.latencyMs ?? 0,
+    };
     const answer = scored.message;
-    const lowerAnswer = answer.toLowerCase();
 
+    // Required facts are matched against every turn's answer joined, because
+    // a multi-turn fixture's facts are spread across turns ("Turn 1: ...").
+    const allAnswers = done
+      .map((t) => t.answer ?? '')
+      .join('\n\n')
+      .toLowerCase();
     const misses = fixture.requiredFacts.filter(
-      (fact) => !lowerAnswer.includes(String(fact).toLowerCase()),
+      (fact) => !allAnswers.includes(String(fact).toLowerCase()),
     );
     const factHits = fixture.requiredFacts.length - misses.length;
 
@@ -376,8 +402,10 @@ const runFixture = async (
 
     return {
       ...base,
+      turns: done,
       latencyMs: scored.latencyMs,
-      turn1LatencyMs,
+      // Kept for older readers: the first turn's latency on multi-turn fixtures.
+      turn1LatencyMs: done.length > 1 ? done[0].latencyMs : undefined,
       answerChars: answer.length,
       sourceCount: scored.sources.length,
       citations: scanCitations(answer, scored.sources.length),
@@ -401,6 +429,13 @@ const runFixture = async (
   } catch (err) {
     return {
       ...base,
+      // Completed turns in full, then the questions that never got an answer.
+      turns: [
+        ...done,
+        ...fixture.turns
+          .slice(done.length)
+          .map((question): TurnRecord => ({ question })),
+      ],
       latencyMs: null,
       error: err instanceof Error ? err.message : String(err),
     };

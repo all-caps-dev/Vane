@@ -186,16 +186,51 @@ This runs vitest once (`vitest run`). Tests live in `src/**/__tests__/`.
 Start Vane (with a SearXNG URL and at least one chat and one embedding model configured), then:
 
 ```
-node scripts/eval/run.ts --url http://127.0.0.1:3000 --fixtures scripts/eval/fixtures.example.json --mode speed --out data/eval
+node scripts/eval/run.ts --url http://127.0.0.1:3000 --mode speed --out data/eval
 ```
 
-Needs Node 24 or newer (it runs the TypeScript file directly). `node scripts/eval/run.ts --help` lists every option, including `--only f01,f02`, `--concurrency`, `--timeout`, and `--chat providerId:key` / `--embedding providerId:key` to override the default of the first provider that has models.
+Needs Node 24 or newer (it runs the TypeScript file directly). `node scripts/eval/run.ts --help` lists every option, including `--fixtures <file>`, `--only f01,f02`, `--concurrency`, `--timeout`, and `--chat providerId:key` / `--embedding providerId:key` to override the default of the first provider that has models.
 
-Fixture files follow `scripts/eval/fixtures.example.json`: each fixture has an `id`, `tags`, one or two `turns`, `requiredFacts`, `acceptableSourceDomains`, `freshness`, `expectAbstain` and `notes`. For two-turn fixtures the first answer is fed back as history and only the second turn is scored.
+### Fixtures
+
+`scripts/eval/fixtures.json` is the canonical set and the default for `--fixtures`: 30 real questions (homelab, accessibility, local-model hardware and tooling), fact-checked against primary sources on 2026-10-31 and updated 2026-11-01. Keep fixture ids stable when a fixture is rewritten, so runs stay comparable by id; say in `notes` what changed and when. `scripts/eval/fixtures.example.json` is a three-fixture placeholder that shows the shape.
+
+Each fixture has:
+
+- `id`, `tags`
+- `turns`: one or more questions, asked in order in one conversation
+- `requiredFacts`: what a good answer states; facts for a later turn start "Turn 2: ..."
+- `acceptableSourceDomains`
+- `freshness`: how fast the answer goes stale (`none`, `historical`, `recent`, `current`)
+- `expectAbstain`: true when the question asks about something that does not exist
+- `notes`: corrections, current values, run-day checks and known bad answers, for the judge
+- `needsHumanCheck` (optional): true when the facts could not be confirmed against the primary source (for example the site blocked automated fetchers). The fixture stays in the set; the judge flags its line and a person confirms it.
+
+### Multi-turn fixtures
+
+For a fixture with several turns, each answer is fed back as history for the next turn, the way the chat UI does. Every turn is stored in the results line:
+
+```json
+{
+  "id": "f04",
+  "turns": [
+    { "question": "How do I expose ...?", "answer": "Use tailscale serve ...", "sources": [ ... ], "latencyMs": 9120 },
+    { "question": "How is that different ...?", "answer": "Funnel ...", "sources": [ ... ], "latencyMs": 8410 }
+  ],
+  "latencyMs": 8410,
+  "turn1LatencyMs": 9120,
+  "answer": "Funnel ...",
+  "sources": [ ... ]
+}
+```
+
+The top-level `answer`, `sources`, `latencyMs`, `sourceCount`, `citations`, acceptable-domain hits and `abstained` still describe the final turn, as before, so older readers keep working. Required facts are matched against all turns' answers joined. On an error, `turns` holds the turns that finished plus the questions that never got an answer. Results files written before turn storage hold plain question strings in `turns`; compare.ts reads both.
+
+### Output files
 
 Each run writes two files to `--out`:
 
-- `results-<mode>-<UTC stamp>.jsonl`: one line per fixture with latency, source count, citation stats, required-fact hits and misses, acceptable-domain hits, whether the answer abstained ("could not find"), any error, and the raw answer and sources.
+- `results-<mode>-<UTC stamp>.jsonl`: one line per fixture with every turn's question, answer, sources and latency, then the final turn's latency, source count, citation stats, required-fact hits and misses, acceptable-domain hits, whether the answer abstained ("could not find"), any error, and the raw answer and sources. `needsHumanCheck: true` is copied from the fixture when set.
 - `summary-<mode>-<UTC stamp>.html`: one self-contained page. The summary table gives mean and p95 latency, mean source count, the share of answers citing a source number that does not exist, the mean required-fact hit rate, the abstain count and errors. Below it, one row per fixture; open "Full answer and sources" to see the whole answer.
 
 Fact hits are case-insensitive substring matches, so treat them as a smoke signal, not a grade.
@@ -211,8 +246,8 @@ node scripts/eval/compare.ts --run "baseline=data/eval/results-speed-<stamp>.jso
 The first `--run` is the baseline. The page has three sections:
 
 - **Summary:** one column per run. Fixtures run, succeeded, errors, mean, median and p95 latency, mean sources, the share of answers with zero sources and with out-of-range citations, total out-of-range citations, mean answer length, abstain count, abstained when expected (abstentions among fixtures with `expectAbstain`, over how many such fixtures succeeded) and mean acceptable-domain hits. The best value in each row is bold: lower for latency, errors, zero sources and out-of-range citations, higher for the rest. Fixtures run, answer length and abstain count are not ranked.
-- **Per fixture:** one row per fixture id (the union across runs), with latency in seconds, sources, out-of-range citations, abstained and any error for each run. A cell is red for an error or out-of-range citations, green when latency is at least 30% lower than the baseline. A fixture missing from a run shows `n/a`.
-- **Answers side by side:** one collapsed block per fixture with each run's answer (first 600 characters, full text in a nested block) and its sources.
+- **Per fixture:** one row per fixture id (the union across runs), with latency in seconds, sources, out-of-range citations, abstained and any error for each run. The row heading shows the tags and, for multi-turn fixtures, the turn count. A cell is red for an error or out-of-range citations, green when latency is at least 30% lower than the baseline. A fixture missing from a run shows `n/a`.
+- **Answers side by side:** one collapsed block per fixture, headed with the turn count and every question. Each run's panel shows the turn count, each earlier turn's answer and sources in its own collapsed block, then the final turn's answer (first 600 characters, full text in a nested block) and its sources.
 
 `--judge <file>` adds judged scores. The file is JSONL, one line per run and fixture, written by a person or a judging model after reading the answers:
 
@@ -222,8 +257,25 @@ The first `--run` is the baseline. The page has three sections:
   "id": "f01",
   "factScore": 0.5,
   "unsupportedClaims": ["Says 9.0 shipped in July"],
-  "notes": "Right Debian release, wrong month."
+  "citedWrongly": false,
+  "notes": "Right Debian release, wrong month; below Perplexity."
 }
 ```
 
-`run` must match a `--run` label (other lines are skipped with a warning), `factScore` is 0 to 1, `unsupportedClaims` is empty when every claim is supported, and `notes` is optional. With a judge file the summary adds the mean judged fact score and the share of answers with at least one unsupported claim (lower is better), the matrix adds a Judged column, and the detail shows the claims and notes.
+`run` must match a `--run` label (other lines are skipped with a warning), `factScore` is 0 to 1, `unsupportedClaims` is empty when every claim is supported, `citedWrongly` (optional) is true when the answer cites `[n]` with no sources, and `notes` is optional. With a judge file the summary adds the mean judged fact score and the share of answers with at least one unsupported claim (lower is better), the matrix adds a Judged column, and the detail shows the claims, notes and a "cited wrongly" flag.
+
+## Judging runs with an agent
+
+Substring fact hits are a smoke signal. The grade comes from a judge: a separate agent run that reads the fixtures and the answers and writes the judge JSONL above.
+
+- `scripts/eval/JUDGE.md` is the rule book: how `factScore` is built (per-fact 1, 0.5 or 0, averaged; version-and-date facts need both; abstain fixtures score 1.0 for "could not find or confirm", 0.5 for an adjacent answer that never confirms, 0.0 for describing the thing as real), what counts as an unsupported claim, `citedWrongly`, the one-sentence notes against a Perplexity-grade answer, the consistency rules across runs, and the exact output shape. It also says which fixture notes call for a run-day check of a live page.
+- `scripts/eval/judge-template.md` is the prompt to paste into the judge: fill in the repository path, the fixtures path, each results file with its label, the output path and the date.
+
+To judge:
+
+1. Run the eval for each configuration you want to compare (`run.ts`), noting each results file.
+2. Copy `scripts/eval/judge-template.md`, fill in the placeholders, and start a separate agent run with it. Use a strong model, and not the one that wrote the answers.
+3. The judge reads `JUDGE.md`, writes the JSONL, checks it with compare.ts, and reports means per run, lines with unsupported claims or wrong citations, skipped errors, run-day pages read, and fixtures that need a human check.
+4. Build the page: `node scripts/eval/compare.ts --run "a=..." --run "b=..." --judge <judge.jsonl> --out data/eval/compare.html`.
+
+Fixtures with `needsHumanCheck: true` are still judged; their notes say so, and a person should confirm those lines before quoting the score.
