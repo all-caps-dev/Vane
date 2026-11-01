@@ -343,6 +343,11 @@ class Researcher {
               question,
               searchConfig,
               countsAsSearchCall: false,
+              // Gap queries are web searches: the same source priors apply.
+              sourceContext: {
+                entities: input.classification.classification.entities ?? [],
+                intent: input.classification.classification.intent ?? 'other',
+              },
             }),
         });
 

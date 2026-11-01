@@ -127,7 +127,7 @@ M2 is about evidence quality: what the writer is given to cite. Between "SearXNG
 - **Evidence contract** (`src/lib/evidence.ts`). Every passage has a `sourceId` (`s` plus 8 hex characters of the sha1 of the normalised URL, the same in every request) and a `chunkId` (`<sourceId>:c<n>`). `sourceKind` says what the text is: `search_snippet` (the search engine's excerpt), `full_page` (text read from the page) or `upload`. A snippet is never presented as page text.
 - **Chunking** (`src/lib/utils/chunkDocument.ts`). Pages are split along their headings into passages of at most 350 tokens. Each passage starts with its heading path (`History > 1900-1945`). Code blocks and tables stay whole; lists keep their bullets; a paragraph longer than the budget is split on sentence ends.
 - **Reranking** (`src/lib/rerank/`). By default an ONNX cross-encoder (`Xenova/ms-marco-MiniLM-L-6-v2`, q8 weights, about 23 MB, downloaded from Hugging Face on first use) runs in process on the CPU, one model call at a time, 16 pairs per batch. If it cannot load, or a rerank fails or times out, Vane uses the embedding model's cosine similarity instead and records a `rerank.fallback` event.
-- **Selection.** Up to the evidence budget (16 passages, quality 24), at most 4 passages from one page, at least 3 distinct pages when there are 3, near-duplicate passages (over 80% shared words) dropped.
+- **Selection.** Up to the evidence budget (16 passages, quality 24; the default is 12 since the source-priors change, see below), at most 4 passages from one page, at least 3 distinct pages when there are 3, near-duplicate passages (over 80% shared words) dropped.
 - **Modes.** Speed reranks the snippets and does not fetch pages. Balanced (with "Read pages in balanced mode" on) reranks the snippets, reads the top 6 pages (4 at a time, first 12 passages of each), and reranks the page passages plus the snippets of pages that could not be read. Quality reads the top 10 pages with a 1.5x budget; the LLM picker and the per-chunk LLM extractor are no longer used unless the reranker is set to `off`, in which case quality behaves exactly as before M2. Speed no longer drops results below 0.5 cosine similarity; the selection budget replaces that threshold.
 - **Writer context.** The writer sees one `<source index=N url="..." title="..." kind="full_page|search_snippet|upload">` per page with `<passage id="..." heading="...">` elements inside, so `[N]` still means source N. Source cards in the UI, the `source` block and the API's `sources` list one entry per page, not per passage. The writer prompt now says to cite a source only when its passage supports the sentence (general knowledge carries no citation) and to prefer `full_page` sources for specific claims.
 
@@ -147,7 +147,7 @@ New trace fields:
 | Reranker                    | `reranker`           | `transformers` (also `embedding`, `off`) | `VANE_RERANKER`                                                |
 | Reranker model              | `rerankerModel`      | `Xenova/ms-marco-MiniLM-L-6-v2`          | `VANE_RERANKER_MODEL`                                          |
 | Read pages in balanced mode | `balancedReadsPages` | on                                       | `VANE_BALANCED_READS_PAGES` (`1`/`true` on, anything else off) |
-| Evidence budget (passages)  | `evidenceBudget`     | `16` (1 to 64; quality uses 1.5x)        | `VANE_EVIDENCE_BUDGET`                                         |
+| Evidence budget (passages)  | `evidenceBudget`     | `12` (1 to 64; quality uses 1.5x)        | `VANE_EVIDENCE_BUDGET`                                         |
 
 As with the SearXNG URL, a select or text setting takes its environment variable only while no value is saved; after that the saved value (Settings UI) wins. The switch follows the trace switch: when its variable is set it decides the value at every startup.
 
@@ -226,6 +226,26 @@ To measure quality mode after a deploy, run the full 30-fixture set (not the 3-f
 ```
 node scripts/eval/run.ts --url http://127.0.0.1:3000 --fixtures <30-fixture file> --mode quality --timeout 420000 --out data/eval
 ```
+
+## Source priors (experimental)
+
+The 2026-10-31 judge found the facts mostly right but cited to blogs and version trackers instead of first-party pages (w3.org for WCAG, truenas.com, nvidia.com, npm or GitHub releases for versions, access-board.gov). Two changes push selection toward first-party pages. Both are on by default and both turn off with one setting.
+
+- **Prior** (`src/lib/sourcePriors.ts`). `sourcePrior(evidence, { entities, intent })` gives each page a value from 0 to 1: `0` for an aggregator or tracker (medium.com, dev.to, linkedin.com, pinterest, quora.com, deepwiki.com, releasebot.io, versionping.app, any domain with "tracker" in its name), `0.25` for anything else, `0.6` for a documentation page (`docs.` or `developer.` host, `readthedocs`, `/docs/` or `/documentation/` in the path), `0.8` for a standards body or registry (w3.org, ietf.org, rfc-editor.org, iso.org, access-board.gov, section508.gov, npmjs.com, pypi.org, crates.io, pkg.go.dev, a GitHub repo's releases or tags page) or the vendor's own domain, and `1.0` for first party plus a docs page. "Vendor" means the registrable domain (subdomains ignored, so proxmox.rdem-systems.com is not Proxmox) equals a word, or two or three joined words, of a classifier entity: "TrueNAS" matches truenas.com, "Home Assistant" matches home-assistant.io; on GitHub the repo owner or name is checked ("llama.cpp" matches github.com/ggml-org/llama.cpp). Generic words ("Community", "Code") and standard names (WCAG, ARIA, so wcag.com is not the W3C) never count. For `opinion` questions first-party pages get no bonus. Nothing depends on the eval fixtures.
+- **Where it applies.** After every rerank of a web search (the snippet rerank, which decides which pages are read, and the passage rerank, which feeds selection), the scores of that one rerank are min-max scaled to 0..1 and each item is ordered by `scaled score + weight * prior`. Scores from different rerankers or different reranks are never compared. The raw `score` is kept; `prior` is added. Academic and discussion search, and reranker `off`, are unchanged.
+- **official_docs variant.** When the planner marks a query `official_docs` and the classifier gave entities, the first such query also runs with a vendor domain guess appended as a plain word (`Proxmox VE 9 release notes proxmox.com`). The guess is the standards body for a standard name (WCAG to w3.org, Section 508 to section508.gov) or the first distinctive entity word plus `.com`. It is not a `site:` operator: SearXNG passes `site:` through, but only some engines (Google, Bing, DuckDuckGo, Brave) honour it, and a wrong guess there would return nothing. The variant only fits under the 3-query cap; it never replaces a planned query.
+
+| Setting                                   | Key                 | Default                    | Environment variable       |
+| ----------------------------------------- | ------------------- | -------------------------- | -------------------------- |
+| Prefer first-party sources (experimental) | `sourcePriorWeight` | `0.5` (0 to 2; `0` is off) | `VANE_SOURCE_PRIOR_WEIGHT` |
+
+The evidence budget default also moved from 16 to 12. 16 was the first guess in M2; the UI shows 8 source cards either way. A saved value in Settings still wins over the new default, so an instance that already saved `16` keeps it until it is changed.
+
+New trace fields:
+
+- `rerank.prior` event, one per rerank when the prior ran: `stage`, `weight`, `boosted` (items above neutral), `penalised` (below neutral), `moved` (items whose position changed).
+- `search.variant` event, one per `web_search` call with an `official_docs` query: `from`, and either `query` and `domain`, or `skipped` (`no_domain`, `cap` or `already_named`).
+- `evidence` event items carry `prior` when one was applied.
 
 ## Run the tests
 

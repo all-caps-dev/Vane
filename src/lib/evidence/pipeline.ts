@@ -115,6 +115,7 @@ export const finishSelection = (
       sourceKind: e.sourceKind,
       extraction: e.extraction,
       score: e.score,
+      ...(e.prior !== undefined ? { prior: e.prior } : {}),
     })),
   });
 

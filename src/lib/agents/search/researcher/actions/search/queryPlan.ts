@@ -99,3 +99,49 @@ export const timeRangeFor = (
   if (freshness === 'current') return 'month';
   return undefined;
 };
+
+/* What addOfficialDocsVariant did, for the 'search.variant' trace event. */
+export type QueryVariant = {
+  from: string;
+  query?: string;
+  domain?: string;
+  skipped?: 'no_domain' | 'cap' | 'already_named';
+};
+
+/*
+  For the first official_docs query, a second query with the vendor domain
+  guess appended as a plain word ("Proxmox VE 9 release notes proxmox.com").
+  Not a site: operator: SearXNG passes site: through, but only some engines
+  (Google, Bing, DuckDuckGo, Brave) honour it and the rest may return
+  nothing. The original query still runs. The variant only fits under the
+  per-call cap; it never pushes a planned query out.
+*/
+export const addOfficialDocsVariant = (
+  planned: PlannedQuery[],
+  domain: string | undefined,
+  max: number = MAX_QUERIES_PER_CALL,
+): { queries: PlannedQuery[]; variant?: QueryVariant } => {
+  const docs = planned.find((q) => q.purpose === 'official_docs');
+  if (!docs) return { queries: planned };
+  if (!domain)
+    return {
+      queries: planned,
+      variant: { from: docs.query, skipped: 'no_domain' },
+    };
+  if (docs.query.toLowerCase().includes(domain.toLowerCase()))
+    return {
+      queries: planned,
+      variant: { from: docs.query, domain, skipped: 'already_named' },
+    };
+  if (planned.length >= max)
+    return {
+      queries: planned,
+      variant: { from: docs.query, domain, skipped: 'cap' },
+    };
+
+  const query = `${docs.query} ${domain}`;
+  return {
+    queries: [...planned, { query, purpose: 'official_docs' }],
+    variant: { from: docs.query, query, domain },
+  };
+};

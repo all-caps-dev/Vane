@@ -9,6 +9,7 @@ const { searchSearxng, scrape, settings } = vi.hoisted(() => ({
     reranker: 'embedding' as 'transformers' | 'embedding' | 'off',
     balancedReadsPages: true,
     budget: 16,
+    priorWeight: 0.5,
   },
 }));
 
@@ -23,6 +24,7 @@ vi.mock('@/lib/config/serverRegistry', () => ({
   getRerankerModel: () => 'test/model',
   getBalancedReadsPages: () => settings.balancedReadsPages,
   getEvidenceBudget: () => settings.budget,
+  getSourcePriorWeight: () => settings.priorWeight,
 }));
 // The cross-encoder must never load in these tests.
 vi.mock('@huggingface/transformers', () => {
@@ -48,6 +50,7 @@ const run = (
     llm?: any;
     budget?: RequestBudget;
     countsAsSearchCall?: boolean;
+    sourceContext?: { entities: string[]; intent: string };
   } = {},
 ) => {
   const trace = new Tracer('on');
@@ -67,6 +70,7 @@ const run = (
     llm: opts.llm ?? ({} as any),
     embedding: { embedText } as any,
     countsAsSearchCall: opts.countsAsSearchCall,
+    sourceContext: opts.sourceContext,
   });
   return { promise, errorSpy, eventSpy, researchBlock };
 };
@@ -89,6 +93,7 @@ beforeEach(() => {
   settings.reranker = 'embedding';
   settings.balancedReadsPages = true;
   settings.budget = 16;
+  settings.priorWeight = 0.5;
 });
 
 describe('executeSearch (speed)', () => {
@@ -191,6 +196,60 @@ describe('executeSearch (speed)', () => {
       'https://b.test/',
       'https://a.test/',
     ]);
+  });
+});
+
+describe('executeSearch (source priors)', () => {
+  // Two equally relevant cat pages, the blog first in engine order.
+  const twoCats = () =>
+    searchSearxng.mockResolvedValue(
+      results(
+        ['Cats blog', 'https://blog.test/cats', 'about cat food'],
+        ['Cats docs', 'https://www.catco.com/docs/food', 'about cat food x'],
+        ['Dogs', 'https://dogs.test/', 'about dogs'],
+      ),
+    );
+  const sourceContext = { entities: ['CatCo'], intent: 'fact' };
+
+  it('puts the first-party page first on a tie and traces it', async () => {
+    twoCats();
+    const { promise, eventSpy } = run(['cat food'], {
+      question: 'cats',
+      sourceContext,
+    });
+    const out = await promise;
+
+    expect(out[0].metadata.url).toBe('https://www.catco.com/docs/food');
+    expect(eventSpy).toHaveBeenCalledWith(
+      'rerank.prior',
+      expect.objectContaining({ stage: 'snippets', weight: 0.5, boosted: 1 }),
+    );
+  });
+
+  it('weight 0 keeps the reranker order', async () => {
+    settings.priorWeight = 0;
+    twoCats();
+    const { promise, eventSpy } = run(['cat food'], {
+      question: 'cats',
+      sourceContext,
+    });
+    const out = await promise;
+
+    expect(out.map((c) => c.metadata.url)).toEqual([
+      'https://blog.test/cats',
+      'https://www.catco.com/docs/food',
+      'https://dogs.test/',
+    ]);
+    expect(eventSpy).not.toHaveBeenCalledWith(
+      'rerank.prior',
+      expect.anything(),
+    );
+  });
+
+  it('does nothing without a source context (academic, discussions)', async () => {
+    twoCats();
+    const out = await run(['cat food'], { question: 'cats' }).promise;
+    expect(out[0].metadata.url).toBe('https://blog.test/cats');
   });
 });
 

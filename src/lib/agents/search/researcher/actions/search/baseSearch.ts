@@ -33,7 +33,13 @@ import {
   getBalancedReadsPages,
   getEvidenceBudget,
   getRerankerKind,
+  getSourcePriorWeight,
 } from '@/lib/config/serverRegistry';
+import {
+  applySourcePriors,
+  PRIOR_NEUTRAL,
+  SourcePriorContext,
+} from '@/lib/sourcePriors';
 
 type Trace = InstanceType<typeof SessionManager>['trace'];
 
@@ -112,6 +118,10 @@ type SearchInput = {
   // False for the gap round's searches, which have their own cap (one or
   // two rounds) and do not take from maxSearchCalls. Default true.
   countsAsSearchCall?: boolean;
+  // The classifier's entities and intent. When set, and the source prior
+  // weight is above 0, each rerank is followed by the source prior
+  // (sourcePriors.ts). Web search sets it; academic and discussion do not.
+  sourceContext?: SourcePriorContext;
 };
 
 /*
@@ -267,8 +277,16 @@ export const executeSearch = async (input: SearchInput): Promise<Chunk[]> => {
     pushSubSteps(input.session, researchBlock);
   };
 
-  const rerank = (stage: string, items: Evidence[], timeoutMs: number) =>
-    rerankEvidence({
+  // Source priors never apply with reranker 'off' (search engine order).
+  const priorWeight =
+    input.sourceContext && reranker.name !== 'off' ? getSourcePriorWeight() : 0;
+
+  const rerank = async (
+    stage: string,
+    items: Evidence[],
+    timeoutMs: number,
+  ) => {
+    const ranked = await rerankEvidence({
       stage,
       items,
       reranker,
@@ -277,6 +295,23 @@ export const executeSearch = async (input: SearchInput): Promise<Chunk[]> => {
       embedding: input.embedding,
       trace,
     });
+    if (!input.sourceContext || priorWeight <= 0) return ranked;
+
+    // A tie-break within this one rerank (see applySourcePriors).
+    const reordered = applySourcePriors(
+      ranked,
+      input.sourceContext,
+      priorWeight,
+    );
+    trace.event('rerank.prior', {
+      stage,
+      weight: priorWeight,
+      boosted: reordered.filter((e) => (e.prior ?? 0) > PRIOR_NEUTRAL).length,
+      penalised: reordered.filter((e) => (e.prior ?? 0) < PRIOR_NEUTRAL).length,
+      moved: reordered.filter((e, i) => e.chunkId !== ranked[i].chunkId).length,
+    });
+    return reordered;
+  };
 
   /* ---- 2. Speed: snippets only ---- */
 

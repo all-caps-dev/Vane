@@ -3,11 +3,14 @@ import { ResearchAction } from '../../../types';
 import { ResearchBlock } from '@/lib/types';
 import { executeSearch } from './baseSearch';
 import {
+  addOfficialDocsVariant,
   MAX_QUERIES_PER_CALL,
   normalizePlannedQueries,
   plannedQuerySchema,
   timeRangeFor,
 } from './queryPlan';
+import { getSourcePriorWeight } from '@/lib/config/serverRegistry';
+import { vendorDomainGuess } from '@/lib/sourcePriors';
 
 /* M3: each query carries the purpose it serves (see queryPlan.ts). The
    older plain-string shape is still accepted at execute time. */
@@ -75,6 +78,10 @@ const webSearchAction: ResearchAction<typeof webSearchSchema> = {
     config.classification.classification.skipSearch === false,
   execute: async (input, additionalConfig) => {
     const planned = normalizePlannedQueries(input.queries);
+    const entities =
+      additionalConfig.classification?.classification.entities ?? [];
+    const intent =
+      additionalConfig.classification?.classification.intent ?? 'other';
 
     const researchBlock = additionalConfig.session.getBlock(
       additionalConfig.researchBlockId,
@@ -93,15 +100,29 @@ const webSearchAction: ResearchAction<typeof webSearchSchema> = {
       timeRange,
     });
 
+    // Experimental (sourcePriorWeight > 0): an official_docs query also
+    // runs with the vendor domain guess as a plain word, within the cap.
+    let toRun = planned;
+    if (getSourcePriorWeight() > 0 && entities.length > 0) {
+      const { queries, variant } = addOfficialDocsVariant(
+        planned,
+        vendorDomainGuess(entities),
+      );
+      toRun = queries;
+      if (variant)
+        additionalConfig.session.trace.event('search.variant', variant);
+    }
+
     const results = await executeSearch({
       llm: additionalConfig.llm,
       embedding: additionalConfig.embedding,
       mode: additionalConfig.mode,
-      queries: planned.map((q) => q.query),
+      queries: toRun.map((q) => q.query),
       researchBlock: researchBlock,
       session: additionalConfig.session,
       question: additionalConfig.question,
       searchConfig: timeRange ? { time_range: timeRange } : undefined,
+      sourceContext: { entities, intent },
     });
 
     return {

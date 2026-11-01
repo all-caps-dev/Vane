@@ -30,7 +30,11 @@ export const getTraceMode = (): 'off' | 'on' | 'full' => {
 export type RerankerKind = 'transformers' | 'embedding' | 'off';
 
 export const DEFAULT_RERANKER_MODEL = 'Xenova/ms-marco-MiniLM-L-6-v2';
-export const DEFAULT_EVIDENCE_BUDGET = 16;
+/* 16 was the first guess (M2). 12 gives the writer a shorter context; the
+   UI shows 8 source cards either way. */
+export const DEFAULT_EVIDENCE_BUDGET = 12;
+// Experimental: weight of the source prior (sourcePriors.ts); 0 disables.
+export const DEFAULT_SOURCE_PRIOR_WEIGHT = 0.5;
 
 // Which reranker to use; anything unknown means the default cross-encoder.
 export const getRerankerKind = (): RerankerKind => {
@@ -50,7 +54,7 @@ export const getBalancedReadsPages = (): boolean => {
   return !(value === false || value === 'false');
 };
 
-// Passages per search, a whole number from 1 to 64; bad input means 16.
+// Passages per search, a whole number from 1 to 64; bad input means 12.
 export const getEvidenceBudget = (): number => {
   const parsed = parseInt(
     String(configManager.getConfig('search.evidenceBudget', '')),
@@ -58,6 +62,19 @@ export const getEvidenceBudget = (): number => {
   );
   if (!Number.isFinite(parsed) || parsed < 1) return DEFAULT_EVIDENCE_BUDGET;
   return Math.min(parsed, 64);
+};
+
+/* "Prefer first-party sources" (experimental): how much the source prior
+   adds to a min-max scaled rerank score. A number from 0 to 2; 0 turns
+   priors (and the official_docs query variant) off; bad input means 0.5. */
+export const getSourcePriorWeight = (): number => {
+  const raw = String(
+    configManager.getConfig('search.sourcePriorWeight', ''),
+  ).trim();
+  const parsed = parseFloat(raw);
+  if (raw === '' || !Number.isFinite(parsed) || parsed < 0)
+    return DEFAULT_SOURCE_PRIOR_WEIGHT;
+  return Math.min(parsed, 2);
 };
 
 /* ---------- Model thinking (M4) ---------- */
