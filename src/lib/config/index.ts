@@ -170,10 +170,22 @@ class ConfigManager {
         required: false,
         description:
           'How many passages each search hands to the writer. Quality mode uses 1.5 times this.',
-        placeholder: '16',
-        default: '16',
+        placeholder: '12',
+        default: '12',
         scope: 'server',
         env: 'VANE_EVIDENCE_BUDGET',
+      },
+      {
+        name: 'Prefer first-party sources (experimental)',
+        key: 'sourcePriorWeight',
+        type: 'string',
+        required: false,
+        description:
+          'Experimental. After ranking, nudge vendor, standards-body, package-registry and documentation pages up and aggregators down by this weight (0 to 2). Also adds a vendor-domain variant to official-docs queries. 0 turns both off.',
+        placeholder: '0.5',
+        default: '0.5',
+        scope: 'server',
+        env: 'VANE_SOURCE_PRIOR_WEIGHT',
       },
       {
         name: 'Model thinking for internal calls',

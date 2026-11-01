@@ -8,12 +8,14 @@ vi.mock('@/lib/config/serverRegistry', () => ({
   getRerankerModel: () => 'test/model',
   getBalancedReadsPages: () => true,
   getEvidenceBudget: () => 16,
+  getSourcePriorWeight: () => 0.5,
 }));
 vi.mock('@huggingface/transformers', () => {
   throw new Error('transformers must not load in queryPlan tests');
 });
 
 import {
+  addOfficialDocsVariant,
   normalizePlannedQueries,
   queryTexts,
   timeRangeFor,
@@ -112,5 +114,50 @@ describe('timeRangeFor', () => {
     expect(timeRangeFor('none')).toBeUndefined();
     expect(timeRangeFor('historical')).toBeUndefined();
     expect(timeRangeFor(undefined)).toBeUndefined();
+  });
+});
+
+describe('addOfficialDocsVariant', () => {
+  const docs = {
+    query: 'Proxmox VE 9 release notes',
+    purpose: 'official_docs' as const,
+  };
+  const primary = { query: 'Proxmox VE 9 Debian', purpose: 'primary' as const };
+
+  it('adds the domain as a plain word, never site:', () => {
+    const { queries, variant } = addOfficialDocsVariant(
+      [primary, docs],
+      'proxmox.com',
+    );
+    expect(queries).toHaveLength(3);
+    expect(queries[2]).toEqual({
+      query: 'Proxmox VE 9 release notes proxmox.com',
+      purpose: 'official_docs',
+    });
+    expect(queries[2].query).not.toContain('site:');
+    expect(variant).toMatchObject({ from: docs.query, domain: 'proxmox.com' });
+  });
+
+  it('keeps the per-call cap and never drops a planned query', () => {
+    const planned = [primary, docs, { query: 'x', purpose: 'issues' as const }];
+    const { queries, variant } = addOfficialDocsVariant(planned, 'proxmox.com');
+    expect(queries).toBe(planned);
+    expect(variant?.skipped).toBe('cap');
+  });
+
+  it('skips without an official_docs query, a domain, or when named', () => {
+    expect(addOfficialDocsVariant([primary], 'proxmox.com').variant).toBe(
+      undefined,
+    );
+    expect(addOfficialDocsVariant([docs], undefined).variant?.skipped).toBe(
+      'no_domain',
+    );
+    const named = {
+      query: 'release notes proxmox.com',
+      purpose: 'official_docs' as const,
+    };
+    expect(
+      addOfficialDocsVariant([named], 'proxmox.com').variant?.skipped,
+    ).toBe('already_named');
   });
 });

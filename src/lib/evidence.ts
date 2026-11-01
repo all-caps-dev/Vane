@@ -14,6 +14,7 @@ import type { DocumentChunk } from '@/lib/utils/chunkDocument';
     (search_snippet), text read from the page (full_page), or an upload.
   - extraction says how reading the page went (always 'ok' for snippets).
   - score comes from the reranker and is only comparable within one rerank.
+  - prior is the source prior (sourcePriors.ts) when one was applied.
 */
 export type Evidence = {
   sourceId: string;
@@ -28,6 +29,7 @@ export type Evidence = {
   sourceKind: 'search_snippet' | 'full_page' | 'upload';
   extraction: 'ok' | 'thin' | 'failed';
   score?: number;
+  prior?: number;
   queries: string[];
   engines?: string[];
   rank?: number;
