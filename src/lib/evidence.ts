@@ -235,6 +235,10 @@ export type SourceGroup = {
   title: string;
   kind: SourceKind;
   passages: Chunk[];
+  /* The highest reranker score among this source's passages, when any
+     passage was reranked. A relevance hint for the UI only: it never
+     changes `index`, so the [N] numbering stays first-appearance order. */
+  bestScore?: number;
 };
 
 // Reads the kind of a Chunk. Chunks made before M2 (uploads, scrape_url,
@@ -297,6 +301,12 @@ export const groupBySource = (chunks: Chunk[]): SourceGroup[] => {
       group.passages = pages;
     }
     group.kind = kindOf(group.passages[0]);
+
+    // Max score over the passages kept above (the ones the writer sees).
+    const scores = group.passages
+      .map((p) => p.metadata?.score)
+      .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+    if (scores.length > 0) group.bestScore = Math.max(...scores);
   });
 
   return result;
@@ -314,6 +324,7 @@ export const sourceCard = (group: SourceGroup): Chunk => ({
     sourceId: group.sourceId,
     sourceKind: group.kind,
     passageCount: group.passages.length,
+    ...(group.bestScore !== undefined ? { bestScore: group.bestScore } : {}),
   },
 });
 
