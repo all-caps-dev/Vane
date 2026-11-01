@@ -205,6 +205,17 @@ class ConfigManager {
         scope: 'server',
         env: 'VANE_INTERNAL_THINKING',
       },
+      {
+        name: 'Search while classifying',
+        key: 'prefetchSearch',
+        type: 'switch',
+        required: false,
+        description:
+          'Start one web search for the question while the classifier is still deciding. The first search reuses it when it plans the same query; otherwise it is dropped.',
+        default: true,
+        scope: 'server',
+        env: 'VANE_PREFETCH_SEARCH',
+      },
     ],
   };
 

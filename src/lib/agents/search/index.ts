@@ -14,6 +14,8 @@ import { Tracer, redactSecrets } from '@/lib/trace';
 import { startRequestTrace, traceAnswer, traceSources } from './trace';
 import { formatSourcesForWriter } from '@/lib/evidence';
 import { formatEvidenceNotes } from './gapCheck';
+import { maybeStartPrefetch } from './prefetch';
+import { getPrefetchSearch } from '@/lib/config/serverRegistry';
 
 class SearchAgent {
   /* Wraps the pipeline so the request trace is always finished, even when
@@ -81,6 +83,17 @@ class SearchAgent {
         .execute();
     }
 
+    // One SearXNG query for the raw question, run while the classifier
+    // answers (prefetch.ts). Undefined when the switch is off or the
+    // question looks like it will not be searched.
+    const prefetch = maybeStartPrefetch({
+      enabled: getPrefetchSearch(),
+      followUp: input.followUp,
+      history: input.chatHistory,
+      sources: input.config.sources,
+      trace: tracer,
+    });
+
     const classifySpan = tracer.span('classify');
 
     const classification = await classify({
@@ -133,7 +146,10 @@ class SearchAgent {
         followUp: input.followUp,
         classification: classification,
         config: input.config,
+        prefetch,
       });
+    } else {
+      prefetch?.discard('skip_search');
     }
 
     const [widgetOutputs, searchResults] = await Promise.all([

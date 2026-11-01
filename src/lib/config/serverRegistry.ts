@@ -90,3 +90,11 @@ export const getInternalThinking = (): InternalThinking =>
     .toLowerCase() === 'off'
     ? 'off'
     : 'default';
+
+/* ---------- Search while classifying (Fleet #346) ---------- */
+
+// On unless explicitly switched off.
+export const getPrefetchSearch = (): boolean => {
+  const value = configManager.getConfig('search.prefetchSearch', true);
+  return !(value === false || value === 'false');
+};

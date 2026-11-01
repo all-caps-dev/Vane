@@ -258,6 +258,7 @@ class Researcher {
         mode: input.config.mode,
         question: input.classification.standaloneFollowUp || input.followUp,
         classification: input.classification,
+        prefetch: input.prefetch,
       });
 
       actionOutput.push(...actionResults);
@@ -293,6 +294,8 @@ class Researcher {
     }
 
     const loopMs = Date.now() - researchStartedAt;
+    // The loop never ran a web_search: the prefetched result goes unused.
+    input.prefetch?.discard('no_web_search');
     const collectResults = () =>
       actionOutput
         .filter((a) => a.type === 'search_results')
