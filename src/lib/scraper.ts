@@ -1,12 +1,17 @@
 import { JSDOM } from 'jsdom';
 import { Readability } from '@mozilla/readability';
 import { Mutex } from 'async-mutex';
+import net from 'node:net';
+import { Agent } from 'undici';
 import type { Tracer } from './trace';
 import {
+  ApprovedAddress,
   assertPublicHttpUrl,
   blockedHostReason,
   BlockedUrlError,
+  resolvePublicHttpUrl,
 } from './utils/safeUrl';
+import { liftWrappedHeadings } from './utils/chunkDocument';
 
 /* Fetching strategy (M1): plain HTTP first, the headless browser only when
    HTTP fails or returns too little text. Every URL, including every redirect
@@ -82,20 +87,105 @@ const decodeBody = (bytes: Uint8Array, contentType: string): string => {
 };
 
 /*
+  DNS rebinding pin. The guard resolves a host name and checks the
+  addresses; if fetch then resolved the name again, a hostile DNS server
+  could answer "public" the first time and "127.0.0.1" the second. So each
+  request gets its own undici Agent whose `lookup` hands back only the
+  addresses the guard approved. The URL keeps the original host name, so the
+  Host header and TLS SNI (and the certificate check) are unchanged.
+
+  undici is the HTTP client inside Node's own fetch; the npm copy is already
+  installed (jsdom depends on it) and its Agent works as fetch's dispatcher.
+*/
+
+// The callback shape of dns.lookup (TypeScript: a function type alias).
+type LookupCallback = (
+  err: NodeJS.ErrnoException | null,
+  address: string | ApprovedAddress[],
+  family?: number,
+) => void;
+
+// Lowercase, no trailing dot, no IPv6 brackets: how host names are compared.
+const cleanHost = (h: string) =>
+  h
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '');
+
+/*
+  A dns.lookup replacement that answers only for `hostname`, and only with
+  the approved addresses. Node calls it as lookup(host, options, callback);
+  options.all asks for an array (used by Happy Eyeballs), options.family
+  may ask for IPv4 or IPv6 only.
+*/
+export const pinnedLookup =
+  (hostname: string, approved: ApprovedAddress[]) =>
+  (
+    host: string,
+    options: { all?: boolean; family?: number | string } | LookupCallback,
+    maybeCallback?: LookupCallback,
+  ): void => {
+    // lookup(host, callback) is also a legal call shape.
+    const callback =
+      typeof options === 'function'
+        ? options
+        : (maybeCallback as LookupCallback);
+    const opts = typeof options === 'function' ? {} : (options ?? {});
+
+    const fail = (message: string) => {
+      const err: NodeJS.ErrnoException = new Error(message);
+      err.code = 'ENOTFOUND';
+      callback(err, '');
+    };
+
+    if (cleanHost(host) !== cleanHost(hostname)) {
+      return fail(`pinned lookup refuses ${host} (pinned to ${hostname})`);
+    }
+
+    const family =
+      opts.family === 'IPv4' ? 4 : opts.family === 'IPv6' ? 6 : opts.family;
+    const matches =
+      family === 4 || family === 6
+        ? approved.filter((a) => a.family === family)
+        : approved;
+    if (matches.length === 0) return fail(`no approved address for ${host}`);
+
+    if (opts.all) callback(null, matches);
+    else callback(null, matches[0].address, matches[0].family);
+  };
+
+// One Agent per request hop, pinned to the addresses the guard approved.
+export const createPinnedDispatcher = (
+  hostname: string,
+  approved: ApprovedAddress[],
+): Agent =>
+  new Agent({
+    // The cast: undici types `lookup` as Node's overloaded LookupFunction.
+    connect: { lookup: pinnedLookup(hostname, approved) as any },
+  });
+
+/*
   Plain HTTP fetch with the SSRF guard on every hop. Never sends cookies.
   Throws BlockedUrlError when the URL or a redirect target is refused;
   every other failure comes back as { ok: false, reason }.
 */
 export const httpFetch = async (url: string): Promise<HttpFetchResult> => {
   const signal = AbortSignal.timeout(HTTP_TIMEOUT_MS);
-  let current = await assertPublicHttpUrl(url);
+  let { url: current, addresses } = await resolvePublicHttpUrl(url);
+  // Every Agent made below, closed in `finally` so no socket stays open.
+  const dispatchers: Agent[] = [];
 
   try {
     for (let hop = 0; ; hop++) {
+      const dispatcher = createPinnedDispatcher(current.hostname, addresses);
+      dispatchers.push(dispatcher);
+
       const res = await fetch(current, {
         redirect: 'manual',
         signal,
         credentials: 'omit',
+        // Not in the standard RequestInit type; Node's fetch accepts it.
+        ...({ dispatcher } as {}),
         headers: {
           'User-Agent': USER_AGENT,
           Accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1',
@@ -110,9 +200,10 @@ export const httpFetch = async (url: string): Promise<HttpFetchResult> => {
           return { ok: false, status: res.status, reason: 'redirects' };
         }
         // Re-check every hop: a public page may redirect to a private one.
-        current = await assertPublicHttpUrl(
+        // The next hop is pinned to its own freshly approved addresses.
+        ({ url: current, addresses } = await resolvePublicHttpUrl(
           new URL(location, current).toString(),
-        );
+        ));
         continue;
       }
 
@@ -146,18 +237,33 @@ export const httpFetch = async (url: string): Promise<HttpFetchResult> => {
       return { ok: false, reason: 'timeout' };
     }
     return { ok: false, reason: `error ${err?.message ?? String(err)}` };
+  } finally {
+    // The body has been read or cancelled by now; free the sockets.
+    for (const d of dispatchers) d.destroy().catch(() => undefined);
   }
 };
 
-// Readability over an HTML string. JSDOM runs no scripts and loads nothing.
+/*
+  Readability over an HTML string. JSDOM runs no scripts and loads nothing.
+  articleHtml is Readability's article as HTML (headings, code and tables
+  intact), handed to chunkDocument so it does not parse the page a second
+  time. Undefined when Readability found no article text. Wrapped headings
+  are lifted first, exactly as chunkDocument does, so sections survive.
+*/
 const extractReadable = (
   html: string,
   url: string,
-): { title: string; text: string } => {
+): { title: string; text: string; articleHtml?: string } => {
   const dom = new JSDOM(html, { url });
+  liftWrappedHeadings(dom.window.document);
   const article = new Readability(dom.window.document).parse();
   const title = dom.window.document.title || article?.title || '';
-  return { title, text: article?.textContent?.trim() ?? '' };
+  const text = article?.textContent?.trim() ?? '';
+  return {
+    title,
+    text,
+    articleHtml: text && article?.content ? article.content : undefined,
+  };
 };
 
 // The content string callers have always received.
@@ -171,6 +277,9 @@ const formatContent = (title: string, url: string, text: string) => `
    - html: the raw HTML that produced the text (the HTTP body or the browser's
      rendered page), so the evidence pipeline can chunk it by section.
      Undefined for text/plain pages and failed fetches.
+   - articleHtml: Readability's article as HTML, from the same parse that
+     produced `text`; chunkDocument uses it instead of parsing `html` again.
+     Undefined when there is no html or Readability found no article.
    - text: the readable plain text (no "# title - url" header line).
    - fetchedAt: when the fetch finished, as a UTC ISO string.
    - failed: true when nothing could be read (blocked, error, timeout). */
@@ -178,6 +287,7 @@ export type ScrapeResult = {
   content: string;
   title: string;
   html?: string;
+  articleHtml?: string;
   text: string;
   fetchedAt: string;
   failed?: boolean;
@@ -190,6 +300,61 @@ const failedResult = (url: string): ScrapeResult => ({
   fetchedAt: new Date().toISOString(),
   failed: true,
 });
+
+/*
+  Browser subresource guard. A page can load hundreds of images and scripts,
+  so the DNS answer for each host name is cached for 60 s per page. The
+  promise itself is cached, so twenty images from one CDN share one lookup.
+  The browser still resolves the name again when it connects (Playwright
+  offers no way to pin it), so this narrows DNS rebinding for subresources
+  rather than closing it; the HTTP path above is the pinned one.
+*/
+export const SUBRESOURCE_DNS_TTL_MS = 60_000;
+
+// null: allowed. blocked true: refused by the guard (goes in the trace).
+// blocked false: the name did not resolve; aborted quietly (fail closed).
+export type SubresourceVerdict = { blocked: boolean; reason: string } | null;
+
+// TypeScript: a Map from host name to its cached verdict and expiry time.
+export type HostVerdictCache = Map<
+  string,
+  { expiresAt: number; verdict: Promise<SubresourceVerdict> }
+>;
+
+export const subresourceBlockReason = async (
+  requestUrl: string,
+  cache: HostVerdictCache,
+  now: number = Date.now(),
+): Promise<SubresourceVerdict> => {
+  let parsed: URL;
+  try {
+    parsed = new URL(requestUrl);
+  } catch {
+    return null;
+  }
+
+  // 1. The cheap literal check (localhost, private suffixes, private IPs).
+  const literal = blockedHostReason(parsed.hostname);
+  if (literal) return { blocked: true, reason: literal };
+
+  // 2. DNS, only for http(s) names (an IP literal already passed step 1).
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+  const host = cleanHost(parsed.hostname);
+  if (net.isIP(host)) return null;
+
+  const cached = cache.get(host);
+  if (cached && cached.expiresAt > now) return cached.verdict;
+
+  const verdict = assertPublicHttpUrl(`${parsed.protocol}//${host}/`).then(
+    (): SubresourceVerdict => null,
+    (err): SubresourceVerdict =>
+      err instanceof BlockedUrlError
+        ? { blocked: true, reason: err.reason }
+        : { blocked: false, reason: 'dns error' },
+  );
+  cache.set(host, { expiresAt: now + SUBRESOURCE_DNS_TTL_MS, verdict });
+  return verdict;
+};
 
 class Scraper {
   private static browser: any | undefined;
@@ -240,26 +405,22 @@ class Scraper {
     including each redirect hop) get the full DNS check; their redirects are
     fetched with maxRedirects 0 so each Location is checked before the browser
     follows it (page.route alone only sees the first URL of a redirect chain).
-    Other requests (images, scripts, XHR) get the cheap no-DNS check.
+    Other requests (images, scripts, XHR) get the cheap literal check, then
+    a DNS check cached per host name for this page (subresourceBlockReason).
   */
   private static async guardRoute(
     route: any,
     onBlocked: (reason: string) => void,
+    hostCache: HostVerdictCache,
   ) {
     const request = route.request();
     const requestUrl: string = request.url();
 
     try {
       if (request.resourceType() !== 'document') {
-        let host = '';
-        try {
-          host = new URL(requestUrl).hostname;
-        } catch {
-          return route.continue();
-        }
-        const reason = blockedHostReason(host);
-        if (!reason) return route.continue();
-        onBlocked(reason);
+        const verdict = await subresourceBlockReason(requestUrl, hostCache);
+        if (!verdict) return route.continue();
+        if (verdict.blocked) onBlocked(verdict.reason);
         return route.abort('blockedbyclient');
       }
 
@@ -284,7 +445,12 @@ class Scraper {
   private static async browserFetch(
     url: string,
     onBlocked: (reason: string) => void,
-  ): Promise<{ title: string; text: string; html: string }> {
+  ): Promise<{
+    title: string;
+    text: string;
+    html: string;
+    articleHtml?: string;
+  }> {
     await this.initBrowser();
 
     if (!this.browser) throw new Error('Browser not initialized');
@@ -302,9 +468,12 @@ class Scraper {
     this.userCount++;
 
     try {
+      // Subresource DNS answers, for this page only (one context, one page).
+      const hostCache: HostVerdictCache = new Map();
+
       // Context level so popups are guarded too.
       await context.route('**/*', (route: any) =>
-        this.guardRoute(route, onBlocked),
+        this.guardRoute(route, onBlocked, hostCache),
       );
 
       const page = await context.newPage();
@@ -320,10 +489,10 @@ class Scraper {
       await page.waitForTimeout(500);
 
       const html = await page.content();
-      const { text } = extractReadable(html, url);
+      const { text, articleHtml } = extractReadable(html, url);
       const title = await page.title();
 
-      return { title, text, html };
+      return { title, text, html, articleHtml };
     } finally {
       this.userCount--;
 
@@ -353,7 +522,9 @@ class Scraper {
     let httpStatus: number | undefined;
     let fallbackReason: string | undefined;
     // Kept so a thin HTTP result can still be used if the browser fails.
-    let thin: { title: string; text: string; html?: string } | undefined;
+    let thin:
+      | { title: string; text: string; html?: string; articleHtml?: string }
+      | undefined;
 
     // 1. Plain HTTP.
     try {
@@ -362,10 +533,14 @@ class Scraper {
 
       if (res.ok) {
         // html stays undefined for text/plain, so callers chunk it as text.
-        const page: { title: string; text: string; html?: string } =
-          res.contentType.toLowerCase().startsWith('text/plain')
-            ? { title: url, text: res.body.trim() }
-            : { ...extractReadable(res.body, res.finalUrl), html: res.body };
+        const page: {
+          title: string;
+          text: string;
+          html?: string;
+          articleHtml?: string;
+        } = res.contentType.toLowerCase().startsWith('text/plain')
+          ? { title: url, text: res.body.trim() }
+          : { ...extractReadable(res.body, res.finalUrl), html: res.body };
 
         if (page.text.length >= MIN_TEXT_CHARS) {
           traceFetch({
@@ -379,6 +554,7 @@ class Scraper {
             content: formatContent(page.title, url, page.text),
             title: page.title,
             html: page.html,
+            articleHtml: page.articleHtml,
             text: page.text,
             fetchedAt: new Date().toISOString(),
           };
@@ -444,6 +620,7 @@ class Scraper {
         content: formatContent(best.title, url, best.text),
         title: best.title,
         html: best.html,
+        articleHtml: best.articleHtml,
         text: best.text,
         fetchedAt: new Date().toISOString(),
       };
@@ -467,6 +644,7 @@ class Scraper {
           content: formatContent(thin.title, url, thin.text),
           title: thin.title,
           html: thin.html,
+          articleHtml: thin.articleHtml,
           text: thin.text,
           fetchedAt: new Date().toISOString(),
         };

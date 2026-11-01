@@ -9,5 +9,15 @@ export const register = async () => {
     }
 
     await import('./lib/config/index');
+
+    /* Start loading the cross-encoder reranker in the background (only when
+       it is the configured reranker). Not awaited: startup never waits for
+       it, and warmUpReranker logs its own result and never throws. */
+    try {
+      const { warmUpReranker } = await import('./lib/rerank/warmup');
+      void warmUpReranker();
+    } catch (error) {
+      console.warn('Reranker warm-up could not start:', error);
+    }
   }
 };

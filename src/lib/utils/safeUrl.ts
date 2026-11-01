@@ -79,6 +79,15 @@ const isPrivateIPv6 = (ip: string): boolean => {
   if ((g[0] & 0xfe00) === 0xfc00) return true; // fc00::/7 unique local
   if ((g[0] & 0xffc0) === 0xfe80) return true; // fe80::/10 link local
 
+  /* NAT64 (RFC 6052 well-known prefix 64:ff9b::/96, and the RFC 8215
+     local-use prefix 64:ff9b:1::/48). A NAT64 gateway turns these into IPv4
+     connections, so 64:ff9b::a9fe:a9fe would reach 169.254.169.254. Refused
+     outright rather than judged by the embedded IPv4 address. */
+  if (g[0] === 0x64 && g[1] === 0xff9b) {
+    if (g.slice(2, 6).every((x) => x === 0)) return true; // /96
+    if (g[2] === 1) return true; // /48 local use
+  }
+
   // ::ffff:a.b.c.d is an IPv4 address in IPv6 clothing: judge the IPv4 part.
   if (allZeroBefore(5) && g[5] === 0xffff) {
     const v4 = [g[6] >> 8, g[6] & 0xff, g[7] >> 8, g[7] & 0xff].join('.');
@@ -123,12 +132,20 @@ export const blockedHostReason = (hostname: string): string | null => {
   return null;
 };
 
+// One address the guard approved, in the shape dns.lookup returns.
+export type ApprovedAddress = { address: string; family: number };
+
 /*
   Parses the URL and refuses it (BlockedUrlError) unless it is http or https
-  and every address its host resolves to is public. Returns the parsed URL.
+  and every address its host resolves to is public. Returns the parsed URL
+  and the addresses that were checked, so the caller can connect to exactly
+  those (see the DNS rebinding pin in scraper.ts). A literal IP host returns
+  itself as the only address.
   DNS errors (unknown host) are thrown as they are, not as BlockedUrlError.
 */
-export const assertPublicHttpUrl = async (url: string): Promise<URL> => {
+export const resolvePublicHttpUrl = async (
+  url: string,
+): Promise<{ url: URL; addresses: ApprovedAddress[] }> => {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -146,7 +163,13 @@ export const assertPublicHttpUrl = async (url: string): Promise<URL> => {
   const host = cleanHostname(parsed.hostname);
 
   // A literal public IP needs no lookup.
-  if (net.isIP(host)) return parsed;
+  const literalFamily = net.isIP(host);
+  if (literalFamily) {
+    return {
+      url: parsed,
+      addresses: [{ address: host, family: literalFamily }],
+    };
+  }
 
   const addresses = await dns.promises.lookup(host, { all: true });
   if (addresses.length === 0) throw new BlockedUrlError('no address');
@@ -154,5 +177,12 @@ export const assertPublicHttpUrl = async (url: string): Promise<URL> => {
     throw new BlockedUrlError('resolves to a private address');
   }
 
-  return parsed;
+  return {
+    url: parsed,
+    addresses: addresses.map((a) => ({ address: a.address, family: a.family })),
+  };
 };
+
+// Same check as resolvePublicHttpUrl, for callers that only need the URL.
+export const assertPublicHttpUrl = async (url: string): Promise<URL> =>
+  (await resolvePublicHttpUrl(url)).url;

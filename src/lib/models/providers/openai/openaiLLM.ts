@@ -19,6 +19,7 @@ import {
 } from 'openai/resources/index.mjs';
 import { Message } from '@/lib/types';
 import { repairJson } from '@toolsycc/json-repair';
+import { retryOnceOnConnectionError } from './connectionRetry';
 
 /*
   Extra request-body fields that turn the model's thinking off, or {} when
@@ -96,24 +97,33 @@ class OpenAILLM extends BaseLLM<OpenAIConfig> {
       });
     });
 
-    const response = await this.openAIClient.chat.completions.create({
-      model: this.config.model,
-      tools: openaiTools.length > 0 ? openaiTools : undefined,
-      messages: this.convertToOpenAIMessages(input.messages),
-      temperature:
-        input.options?.temperature ?? this.config.options?.temperature ?? 1.0,
-      top_p: input.options?.topP ?? this.config.options?.topP,
-      max_completion_tokens:
-        input.options?.maxTokens ?? this.config.options?.maxTokens,
-      stop: input.options?.stopSequences ?? this.config.options?.stopSequences,
-      frequency_penalty:
-        input.options?.frequencyPenalty ??
-        this.config.options?.frequencyPenalty,
-      presence_penalty:
-        input.options?.presencePenalty ?? this.config.options?.presencePenalty,
-      // The SDK types do not know this key; the cast lets it through to the body.
-      ...(thinkingBody(input.options) as {}),
-    });
+    // One retry if the server could not be reached (see connectionRetry.ts).
+    const response = await retryOnceOnConnectionError(
+      () =>
+        this.openAIClient.chat.completions.create({
+          model: this.config.model,
+          tools: openaiTools.length > 0 ? openaiTools : undefined,
+          messages: this.convertToOpenAIMessages(input.messages),
+          temperature:
+            input.options?.temperature ??
+            this.config.options?.temperature ??
+            1.0,
+          top_p: input.options?.topP ?? this.config.options?.topP,
+          max_completion_tokens:
+            input.options?.maxTokens ?? this.config.options?.maxTokens,
+          stop:
+            input.options?.stopSequences ?? this.config.options?.stopSequences,
+          frequency_penalty:
+            input.options?.frequencyPenalty ??
+            this.config.options?.frequencyPenalty,
+          presence_penalty:
+            input.options?.presencePenalty ??
+            this.config.options?.presencePenalty,
+          // The SDK types do not know this key; the cast lets it through to the body.
+          ...(thinkingBody(input.options) as {}),
+        }),
+      'OpenAI generateText',
+    );
 
     if (response.choices && response.choices.length > 0) {
       return {
@@ -212,24 +222,33 @@ class OpenAILLM extends BaseLLM<OpenAIConfig> {
   }
 
   async generateObject<T>(input: GenerateObjectInput): Promise<T> {
-    const response = await this.openAIClient.chat.completions.parse({
-      messages: this.convertToOpenAIMessages(input.messages),
-      model: this.config.model,
-      temperature:
-        input.options?.temperature ?? this.config.options?.temperature ?? 1.0,
-      top_p: input.options?.topP ?? this.config.options?.topP,
-      max_completion_tokens:
-        input.options?.maxTokens ?? this.config.options?.maxTokens,
-      stop: input.options?.stopSequences ?? this.config.options?.stopSequences,
-      frequency_penalty:
-        input.options?.frequencyPenalty ??
-        this.config.options?.frequencyPenalty,
-      presence_penalty:
-        input.options?.presencePenalty ?? this.config.options?.presencePenalty,
-      response_format: zodResponseFormat(input.schema, 'object'),
-      // The SDK types do not know this key; the cast lets it through to the body.
-      ...(thinkingBody(input.options) as {}),
-    });
+    // One retry if the server could not be reached (see connectionRetry.ts).
+    const response = await retryOnceOnConnectionError(
+      () =>
+        this.openAIClient.chat.completions.parse({
+          messages: this.convertToOpenAIMessages(input.messages),
+          model: this.config.model,
+          temperature:
+            input.options?.temperature ??
+            this.config.options?.temperature ??
+            1.0,
+          top_p: input.options?.topP ?? this.config.options?.topP,
+          max_completion_tokens:
+            input.options?.maxTokens ?? this.config.options?.maxTokens,
+          stop:
+            input.options?.stopSequences ?? this.config.options?.stopSequences,
+          frequency_penalty:
+            input.options?.frequencyPenalty ??
+            this.config.options?.frequencyPenalty,
+          presence_penalty:
+            input.options?.presencePenalty ??
+            this.config.options?.presencePenalty,
+          response_format: zodResponseFormat(input.schema, 'object'),
+          // The SDK types do not know this key; the cast lets it through to the body.
+          ...(thinkingBody(input.options) as {}),
+        }),
+      'OpenAI generateObject',
+    );
 
     if (response.choices && response.choices.length > 0) {
       try {
