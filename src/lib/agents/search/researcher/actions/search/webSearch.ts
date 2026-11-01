@@ -123,6 +123,8 @@ const webSearchAction: ResearchAction<typeof webSearchSchema> = {
       question: additionalConfig.question,
       searchConfig: timeRange ? { time_range: timeRange } : undefined,
       sourceContext: { entities, intent },
+      // Only the first web_search can use it; the claim is one-shot.
+      prefetch: additionalConfig.prefetch,
     });
 
     return {

@@ -4,6 +4,8 @@ import BaseEmbedding from '@/lib/models/base/embedding';
 import SessionManager from '@/lib/session';
 import { ChatTurnMessage, Chunk } from '@/lib/types';
 import type { SourceGroup } from '@/lib/evidence';
+import type { Prefetch } from './prefetch';
+import type { InternalModelFallback } from '@/lib/models/internalModel';
 
 export type SearchSources = 'web' | 'discussions' | 'academic';
 
@@ -14,7 +16,16 @@ export type SearchAgentConfig = {
   embedding: BaseEmbedding<any>;
   mode: 'speed' | 'balanced' | 'quality';
   systemInstructions: string;
+  // The optional second model for internal calls (classifier, researcher
+  // planner, gap check, widgets). Unset means the chat model serves them.
+  internalLlm?: BaseLLM<any>;
+  // Set when an internal model was configured but could not be used.
+  internalModelFallback?: InternalModelFallback;
 };
+
+// The model for internal calls: the internal model when loaded, else the chat model.
+export const internalLlmOf = (config: SearchAgentConfig): BaseLLM<any> =>
+  config.internalLlm ?? config.llm;
 
 export type SearchAgentInput = {
   chatHistory: ChatTurnMessage[];
@@ -92,6 +103,9 @@ export type AdditionalConfig = {
   question?: string;
   // The classifier's output; web search reads freshness from it (M3).
   classification?: ClassifierOutput;
+  // The search started while the classifier ran; the first web_search may
+  // reuse it (prefetch.ts).
+  prefetch?: Prefetch;
 };
 
 export type ResearcherInput = {
@@ -99,6 +113,8 @@ export type ResearcherInput = {
   followUp: string;
   classification: ClassifierOutput;
   config: SearchAgentConfig;
+  // The search started while the classifier ran (prefetch.ts).
+  prefetch?: Prefetch;
 };
 
 export type ResearcherOutput = {

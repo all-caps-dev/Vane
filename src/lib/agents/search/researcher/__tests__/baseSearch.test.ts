@@ -51,6 +51,7 @@ const run = (
     budget?: RequestBudget;
     countsAsSearchCall?: boolean;
     sourceContext?: { entities: string[]; intent: string };
+    prefetch?: any;
   } = {},
 ) => {
   const trace = new Tracer('on');
@@ -71,6 +72,7 @@ const run = (
     embedding: { embedText } as any,
     countsAsSearchCall: opts.countsAsSearchCall,
     sourceContext: opts.sourceContext,
+    prefetch: opts.prefetch,
   });
   return { promise, errorSpy, eventSpy, researchBlock };
 };
@@ -443,5 +445,130 @@ describe('executeSearch (request budget)', () => {
     });
     // The scraper got the request budget to take from.
     expect(scrape.mock.calls[0][2]).toBeInstanceOf(RequestBudget);
+  });
+});
+
+describe('executeSearch with a prefetched query (Fleet #346)', () => {
+  const makePrefetch = async (query: string, response: unknown) => {
+    const { Prefetch } = await import('@/lib/agents/search/prefetch');
+    return new Prefetch(
+      query,
+      new Tracer('off'),
+      vi.fn(async () => response as any),
+    );
+  };
+
+  it('replaces the matching planned query and shows the normal steps', async () => {
+    const prefetch = await makePrefetch(
+      'Cat food',
+      results(['Cats', 'https://a.test/', 'about cat food']),
+    );
+    searchSearxng.mockResolvedValue(
+      results(['Dogs', 'https://b.test/', 'about dogs']),
+    );
+
+    const { promise, researchBlock } = run(['dog food', 'cat food'], {
+      question: 'cats',
+      prefetch,
+    });
+    const out = await promise;
+
+    // Only the non-matching query went to SearXNG.
+    expect(searchSearxng).toHaveBeenCalledTimes(1);
+    expect(searchSearxng.mock.calls[0][0]).toBe('dog food');
+    expect(out.map((c) => c.metadata.url).sort()).toEqual([
+      'https://a.test/',
+      'https://b.test/',
+    ]);
+    expect(researchBlock.data.subSteps[0]).toMatchObject({
+      type: 'searching',
+      searching: ['dog food', 'cat food'],
+    });
+  });
+
+  it('merges a non-matching prefetch as one extra query', async () => {
+    const prefetch = await makePrefetch(
+      'what should my cat eat',
+      results(
+        ['Extra', 'https://extra.test/', 'cat diet'],
+        ['Cats again', 'https://a.test/', 'about cat food'],
+      ),
+    );
+    searchSearxng.mockResolvedValue(
+      results(['Cats', 'https://a.test/', 'about cat food']),
+    );
+
+    const { promise, researchBlock } = run(['cat food'], { prefetch });
+    const out = await promise;
+
+    // The planned query still runs; the prefetch adds its results.
+    expect(searchSearxng).toHaveBeenCalledTimes(1);
+    expect(searchSearxng.mock.calls[0][0]).toBe('cat food');
+    // a.test came from both and is one source (normalised-URL dedup).
+    expect(out.map((c) => c.metadata.url).sort()).toEqual([
+      'https://a.test/',
+      'https://extra.test/',
+    ]);
+    expect(researchBlock.data.subSteps[0]).toMatchObject({
+      type: 'searching',
+      searching: ['cat food', 'what should my cat eat'],
+    });
+    expect(prefetch.isDecided).toBe(true);
+  });
+
+  it('keeps a time-ranged planned query and adds the prefetch', async () => {
+    const prefetch = await makePrefetch(
+      'cat food',
+      results(['Old', 'https://old.test/', 'cat food from years ago']),
+    );
+    searchSearxng.mockResolvedValue(
+      results(['New', 'https://new.test/', 'cat food this month']),
+    );
+
+    const researchBlock: any = {
+      id: 'r',
+      type: 'research',
+      data: { subSteps: [] },
+    };
+    const out = await executeSearch({
+      queries: ['cat food'],
+      mode: 'speed',
+      researchBlock,
+      session: { trace: new Tracer('off'), updateBlock: vi.fn() } as any,
+      llm: {} as any,
+      embedding: { embedText } as any,
+      searchConfig: { time_range: 'month' },
+      prefetch,
+    });
+
+    expect(searchSearxng).toHaveBeenCalledWith(
+      'cat food',
+      { time_range: 'month' },
+      expect.anything(),
+    );
+    expect(out.map((c) => c.metadata.url).sort()).toEqual([
+      'https://new.test/',
+      'https://old.test/',
+    ]);
+  });
+
+  it('runs the planned queries alone when the prefetch failed', async () => {
+    const { Prefetch } = await import('@/lib/agents/search/prefetch');
+    const prefetch = new Prefetch(
+      'what should my cat eat',
+      new Tracer('off'),
+      vi.fn(async () => {
+        throw new Error('SearXNG search timed out');
+      }),
+    );
+    searchSearxng.mockResolvedValue(
+      results(['Cats', 'https://a.test/', 'about cat food']),
+    );
+
+    const { promise } = run(['cat food'], { prefetch });
+    const out = await promise;
+
+    expect(searchSearxng).toHaveBeenCalledTimes(1);
+    expect(out.map((c) => c.metadata.url)).toEqual(['https://a.test/']);
   });
 });

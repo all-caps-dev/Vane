@@ -1,4 +1,6 @@
 import ModelRegistry from '@/lib/models/registry';
+import { loadInternalModel } from '@/lib/models/internalModel';
+import { getInternalModelSetting } from '@/lib/config/serverRegistry';
 import { ModelWithProvider } from '@/lib/models/types';
 import SessionManager from '@/lib/session';
 import { ChatTurnMessage } from '@/lib/types';
@@ -34,12 +36,19 @@ export const POST = async (req: Request) => {
 
     const registry = new ModelRegistry();
 
-    const [llm, embeddings] = await Promise.all([
+    /* The internal model (if set) loads once, next to the chat model. It
+       never fails the request: on any problem the chat model serves. */
+    const [llm, embeddings, internal] = await Promise.all([
       registry.loadChatModel(body.chatModel.providerId, body.chatModel.key),
       registry.loadEmbeddingModel(
         body.embeddingModel.providerId,
         body.embeddingModel.key,
       ),
+      loadInternalModel({
+        setting: getInternalModelSetting(),
+        chatModel: body.chatModel,
+        registry,
+      }),
     ]);
 
     const history: ChatTurnMessage[] = body.history.map((msg) => {
@@ -62,6 +71,8 @@ export const POST = async (req: Request) => {
           mode: body.optimizationMode,
           fileIds: [],
           systemInstructions: body.systemInstructions || '',
+          internalLlm: internal.llm,
+          internalModelFallback: internal.fallback,
         },
         followUp: body.query,
         chatId: crypto.randomUUID(),

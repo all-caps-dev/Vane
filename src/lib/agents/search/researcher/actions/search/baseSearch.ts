@@ -40,6 +40,7 @@ import {
   PRIOR_NEUTRAL,
   SourcePriorContext,
 } from '@/lib/sourcePriors';
+import type { Prefetch, SearxngResponse } from '../../../prefetch';
 
 type Trace = InstanceType<typeof SessionManager>['trace'];
 
@@ -122,6 +123,10 @@ type SearchInput = {
   // weight is above 0, each rerank is followed by the source prior
   // (sourcePriors.ts). Web search sets it; academic and discussion do not.
   sourceContext?: SourcePriorContext;
+  // The query started while the classifier ran. Only the first web_search
+  // passes it; it replaces the matching planned query or is merged as one
+  // extra query (prefetch.ts).
+  prefetch?: Prefetch;
 };
 
 /*
@@ -153,11 +158,19 @@ export const executeSearch = async (input: SearchInput): Promise<Chunk[]> => {
   ) {
     return [];
   }
+  // Decided at once (before any await), so later web_searches never see it.
+  const prefetched = input.prefetch
+    ? input.prefetch.claim(input.queries, input.searchConfig)
+    : null;
+  const extraQuery = prefetched?.mode === 'extra' ? prefetched : null;
 
   researchBlock.data.subSteps.push({
     id: crypto.randomUUID(),
     type: 'searching',
-    searching: input.queries,
+    // A merged prefetch is shown as one more query of this search.
+    searching: extraQuery
+      ? [...input.queries, extraQuery.query]
+      : input.queries,
   });
   pushSubSteps(input.session, researchBlock);
 
@@ -171,6 +184,8 @@ export const executeSearch = async (input: SearchInput): Promise<Chunk[]> => {
   // The results in the pre-M2 shape, for the legacy quality path only.
   const legacyResults: Chunk[] = [];
   let failedQueries = 0;
+  // Whether the merged prefetch brought results (it is not a planned query).
+  let extraOk = false;
 
   // Shows this query's results in the UI's search_results step.
   const emitSearchResults = (chunks: Chunk[]) => {
@@ -190,14 +205,28 @@ export const executeSearch = async (input: SearchInput): Promise<Chunk[]> => {
     pushSubSteps(input.session, researchBlock);
   };
 
-  const search = async (q: string) => {
-    const res = await searchOrNull(
-      q,
-      {
-        ...(input.searchConfig ? input.searchConfig : {}),
-      },
-      trace,
-    );
+  /* `preset` is the prefetched response standing in for this query. A
+     replaced query whose prefetch failed runs normally; a failed extra
+     query is simply skipped. */
+  const search = async (
+    q: string,
+    preset?: Promise<SearxngResponse | null>,
+    extra = false,
+  ) => {
+    const reused = preset ? await preset : null;
+    if (extra) {
+      if (!reused) return;
+      extraOk = true;
+    }
+    const res =
+      reused ??
+      (await searchOrNull(
+        q,
+        {
+          ...(input.searchConfig ? input.searchConfig : {}),
+        },
+        trace,
+      ));
 
     if (!res) {
       failedQueries++;
@@ -244,10 +273,24 @@ export const executeSearch = async (input: SearchInput): Promise<Chunk[]> => {
     emitSearchResults(shown);
   };
 
-  await Promise.all(input.queries.map(search));
+  await Promise.all([
+    ...input.queries.map((q, i) =>
+      search(
+        q,
+        prefetched?.mode === 'replace' && prefetched.index === i
+          ? prefetched.result
+          : undefined,
+      ),
+    ),
+    ...(extraQuery ? [search(extraQuery.query, extraQuery.result, true)] : []),
+  ]);
 
   // Every query failed: nothing to rank or read.
-  if (input.queries.length > 0 && failedQueries === input.queries.length) {
+  if (
+    input.queries.length > 0 &&
+    failedQueries === input.queries.length &&
+    !extraOk
+  ) {
     return [];
   }
 

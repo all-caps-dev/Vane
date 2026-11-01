@@ -29,10 +29,22 @@ export const startRequestTrace = (
         historyMessages: input.chatHistory.length,
         questionChars: input.followUp.length,
         chatModel: describeModel(input.config.llm),
+        // Serves the classifier, planner, gap check and widgets.
+        internalModel: describeModel(
+          input.config.internalLlm ?? input.config.llm,
+        ),
+        internalModelSource: input.config.internalLlm ? 'internal' : 'chat',
         embeddingModel: describeModel(input.config.embedding),
         question: tracer.content(input.followUp),
         chatHistory: tracer.content(input.chatHistory),
       });
+      // A configured internal model that could not be used (the chat
+      // model served instead). The setting text is a providerId:key.
+      if (input.config.internalModelFallback) {
+        tracer.event('internalModel.fallback', {
+          ...input.config.internalModelFallback,
+        });
+      }
     } catch (err) {
       tracer.error('trace.request', err);
     }

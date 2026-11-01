@@ -28,6 +28,8 @@ Top-level fields: `requestId`, `startedAt` (UTC), `traceMode` (`on` or `full`), 
 Spans: `classify`, `widgets`, `research`, `rerank` (M2), `pick` (quality with reranker `off` only), `write`. The M1 `embed` span is gone: embedding similarity now runs inside the `rerank` span when the embedding reranker is used.
 Events: `request`, `research.iteration`, `research.actions`, `search.plan` (M3), `search.query`, `fetch`, `chunk`, `rerank.fallback`, `select`, `evidence`, `extract` (reranker `off` only), `gap` (M3), `budget.exhausted`, `dedup`, `sources`, `citations`, `citations.removed`.
 
+Events: `request`, `prefetch`, `research.iteration`, `research.actions`, `search.plan` (M3), `search.query`, `fetch`, `chunk`, `rerank.fallback`, `select`, `evidence`, `extract` (reranker `off` only), `gap` (M3), `dedup`, `sources`, `citations`, `citations.removed`.
+
 Fields added in M1:
 
 - `embed` span: `count` (texts embedded in the one batched call: the query plus every result) and `durationMs`.
@@ -246,6 +248,37 @@ New trace fields:
 - `rerank.prior` event, one per rerank when the prior ran: `stage`, `weight`, `boosted` (items above neutral), `penalised` (below neutral), `moved` (items whose position changed).
 - `search.variant` event, one per `web_search` call with an `official_docs` query: `from`, and either `query` and `domain`, or `skipped` (`no_domain`, `cap` or `already_named`).
 - `evidence` event items carry `prior` when one was applied.
+
+## Search while classifying (Fleet #346 item 1)
+
+Before this change every search waited for the classifier (about 1.2 s). Now, when a deterministic pre-check (`shouldPrefetch` in `src/lib/agents/search/prefetch.ts`) says the message will almost certainly be searched, one SearXNG query for the raw question (no `time_range`) starts at the same time as the classifier. The check is true when web is an enabled source, the message has at least 4 words, does not open with a greeting or thanks, does not contain "from memory", "without searching" or "don't search", and does not start with a rewriting verb (`rewrite`, `rephrase`, `translate`, `proofread`, `summarize this`, ...).
+
+- **Replacement.** When the researcher's first `web_search` plans a query equal to the raw question after `queryKey` normalisation (case and spacing) and asks for no `time_range`, that query's SearXNG call is replaced by the prefetched results. No extra query is added.
+- **Extra query.** Otherwise (no planned query matches, or freshness adds a `time_range`) the prefetched results are merged into that call as one extra query, the raw question without `time_range`, next to every planned query, which all run as planned. The `searching` step lists it after the planned queries. Overlapping pages are merged by the normalised-URL dedup in `executeSearch`. The per-call cap of 3 applies to planned queries only; the prefetched query does not count against it.
+- **Discard.** The prefetch is dropped only when the classifier sets `skipSearch` (`skip_search`), when the prefetched query failed (`failed`; a replaced query then runs normally, an extra query is skipped), or when research ends without any `web_search` (`no_web_search`). A dropped prefetch never adds a step to the research block. Later `web_search` calls never use it.
+
+Setting (server scope): **Search while classifying**, key `prefetchSearch`, default on, environment variable `VANE_PREFETCH_SEARCH` (a switch: when set it decides the value at every startup, `1`/`true` on, anything else off).
+
+New trace event `prefetch`, one `started` and at most one outcome per request:
+
+- `status: 'started'` (with `query` in `full` mode only).
+- `status: 'reused_as_replacement'` or `'reused_as_extra'`: `savedMsEstimate` (how much of the query had run before the researcher asked for it: the whole query when it had finished, the elapsed part when it had not) and `waitedMs` (how long the researcher still waited for it).
+- `status: 'discarded'`: `reason` (`skip_search`, `no_web_search`, `failed`) and `ranMs` (not on `failed`).
+
+The prefetched query also writes its own `search.query` event, so a discarded prefetch still appears there.
+
+## Internal model (Fleet #346 item 3)
+
+Vane used one chat model for every call of a request. An optional second model now serves the internal calls: the classifier, the researcher loop's tool-calling planner (`streamText`), the gap check and the weather, stock and calculation widgets. The writer's answer, and the legacy picker and extractor (quality mode with reranker `off`), keep the chat model picked in the chat.
+
+- **Setting** (server scope): Settings, Search, **Internal model**, key `internalModel`, environment variable `VANE_INTERNAL_MODEL`, default `same` ("Same as chat model"). The value is `providerId:key`; the key may itself contain `:` (the first one splits). The select lists every chat model configured when the settings dialog opens: `GET /api/config` fills its options from the same live model list `/api/providers` returns, so no UI component changed. A saved model that is no longer configured stays in the list marked "(not available)". Like the other select settings, the environment variable applies only while no value is saved.
+- **Loading.** Both `/api/chat` and `/api/search` load it once per request, in parallel with the chat and embedding models (`src/lib/models/internalModel.ts`). A value equal to the chat model loads nothing. A malformed value or a failed load never fails the request: the chat model serves, one `[internal model]` line is logged, and the trace records it.
+
+New trace fields:
+
+- `request` event: `internalModel` (`impl` and `key` of the model serving internal calls) and `internalModelSource` (`internal` or `chat`).
+- `internalModel.fallback` event: `requested` (the setting), `reason` (`invalid` or `load_failed`) and `error`.
+- `model` attribute on the `classify`, `widgets` and `research` spans (the research span covers the planner and the gap check) and on the `write` span (always the chat model).
 
 ## Run the tests
 

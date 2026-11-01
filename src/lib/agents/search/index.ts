@@ -1,4 +1,4 @@
-import { ResearcherOutput, SearchAgentInput } from './types';
+import { internalLlmOf, ResearcherOutput, SearchAgentInput } from './types';
 import SessionManager from '@/lib/session';
 import { classify } from './classifier';
 import Researcher from './researcher';
@@ -10,10 +10,12 @@ import { and, eq, gt } from 'drizzle-orm';
 import { TextBlock } from '@/lib/types';
 import { getTokenCount } from '@/lib/utils/splitText';
 import { sanitizeCitations } from '@/lib/utils/sanitizeCitations';
-import { Tracer, redactSecrets } from '@/lib/trace';
+import { Tracer, describeModel, redactSecrets } from '@/lib/trace';
 import { startRequestTrace, traceAnswer, traceSources } from './trace';
 import { formatSourcesForWriter } from '@/lib/evidence';
 import { formatEvidenceNotes } from './gapCheck';
+import { maybeStartPrefetch } from './prefetch';
+import { getPrefetchSearch } from '@/lib/config/serverRegistry';
 
 class SearchAgent {
   /* Wraps the pipeline so the request trace is always finished, even when
@@ -81,13 +83,29 @@ class SearchAgent {
         .execute();
     }
 
-    const classifySpan = tracer.span('classify');
+    // One SearXNG query for the raw question, run while the classifier
+    // answers (prefetch.ts). Undefined when the switch is off or the
+    // question looks like it will not be searched.
+    const prefetch = maybeStartPrefetch({
+      enabled: getPrefetchSearch(),
+      followUp: input.followUp,
+      history: input.chatHistory,
+      sources: input.config.sources,
+      trace: tracer,
+    });
+
+    // The classifier, planner, gap check and widgets use the internal
+    // model when one is loaded; the writer always uses the chat model.
+    const internalLlm = internalLlmOf(input.config);
+    const internalModel = describeModel(internalLlm);
+
+    const classifySpan = tracer.span('classify', { model: internalModel });
 
     const classification = await classify({
       chatHistory: input.chatHistory,
       enabledSources: input.config.sources,
       query: input.followUp,
-      llm: input.config.llm,
+      llm: internalLlm,
     });
 
     /* Every classification field, including the M3 freshness, intent and
@@ -98,13 +116,13 @@ class SearchAgent {
       standaloneFollowUp: tracer.content(classification.standaloneFollowUp),
     });
 
-    const widgetSpan = tracer.span('widgets');
+    const widgetSpan = tracer.span('widgets', { model: internalModel });
 
     const widgetPromise = WidgetExecutor.executeAll({
       classification,
       chatHistory: input.chatHistory,
       followUp: input.followUp,
-      llm: input.config.llm,
+      llm: internalLlm,
     }).then((widgetOutputs) => {
       widgetSpan.end({
         count: widgetOutputs.length,
@@ -133,7 +151,10 @@ class SearchAgent {
         followUp: input.followUp,
         classification: classification,
         config: input.config,
+        prefetch,
       });
+    } else {
+      prefetch?.discard('skip_search');
     }
 
     const [widgetOutputs, searchResults] = await Promise.all([
@@ -176,6 +197,7 @@ class SearchAgent {
 
     const writeStartedAt = Date.now();
     const writeSpan = tracer.span('write', {
+      model: describeModel(input.config.llm),
       writerPromptTokens: tracer.enabled
         ? getTokenCount(writerPrompt)
         : undefined,
