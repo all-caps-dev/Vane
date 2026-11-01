@@ -331,6 +331,10 @@ const AssistantSteps = ({
                                   key={idx}
                                   href={url}
                                   target="_blank"
+                                  rel="noopener noreferrer"
+                                  // Starts with the visible title (WCAG 2.5.3),
+                                  // then says it opens a tab, as Citation does.
+                                  aria-label={`${title}, opens in a new tab`}
                                   className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs font-medium bg-light-100 dark:bg-dark-100 text-black/70 dark:text-white/70 border border-light-200 dark:border-dark-200"
                                 >
                                   {faviconUrl && (
@@ -391,10 +395,13 @@ const AssistantSteps = ({
                                     result.metadata.fileName)) ||
                                 'Untitled document';
 
+                              /* Not a link: uploads are file_id:// chunks
+                                 and no route serves the file back, so the
+                                 card is plain text with no pointer cursor. */
                               return (
                                 <div
                                   key={idx}
-                                  className="flex flex-row space-x-3 rounded-lg border border-light-200 dark:border-dark-200 bg-light-100 dark:bg-dark-100 p-2 cursor-pointer"
+                                  className="flex flex-row space-x-3 rounded-lg border border-light-200 dark:border-dark-200 bg-light-100 dark:bg-dark-100 p-2"
                                 >
                                   <div className="mt-0.5 h-10 w-10 rounded-md bg-cyan-100 text-cyan-800 dark:bg-sky-500 dark:text-cyan-50 flex items-center justify-center">
                                     <FileText className="w-5 h-5" />

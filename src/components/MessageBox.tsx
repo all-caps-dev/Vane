@@ -1,7 +1,7 @@
 'use client';
 
 /* eslint-disable @next/next/no-img-element */
-import React, { MutableRefObject, useRef } from 'react';
+import React, { MutableRefObject, useEffect, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import {
   BookCopy,
@@ -75,11 +75,31 @@ const MessageBox = ({
   const { speechStatus, start, stop } = useSpeech({ text: speechMessage });
 
   /* Screen reader announcements for research progress. AssistantSteps writes
-     one short line here when a step starts or finishes. The region lives in
+     one short line here when a step starts or finishes, and the effect below
+     writes "Answer ready" when the answer is done. The region lives in
      MessageBox, not AssistantSteps, so it is already in the page before the
      first step arrives (a live region added together with its text is often
      not read). */
   const researchStatusRef = useRef<HTMLDivElement | null>(null);
+
+  /* Say "Answer ready" once when this message finishes. useChat sets the
+     status to 'completed' on messageEnd. Only a change from 'answering' to
+     'completed' seen while mounted counts, so opening an old chat (already
+     completed on first render) says nothing, and a repeat render does not
+     say it twice. */
+  const status = section.message.status;
+  const prevStatusRef = useRef(status);
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    prevStatusRef.current = status;
+    if (
+      prev === 'answering' &&
+      status === 'completed' &&
+      researchStatusRef.current
+    ) {
+      researchStatusRef.current.textContent = 'Answer ready.';
+    }
+  }, [status]);
 
   const markdownOverrides: MarkdownToJSX.Options = {
     renderRule(next, node, renderChildren, state) {
