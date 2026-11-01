@@ -2,6 +2,7 @@ import { EventEmitter } from 'stream';
 import { applyPatch } from 'rfc6902';
 import { Block } from './types';
 import { Tracer } from './trace';
+import type { RequestBudget } from './agents/search/budgets';
 
 const sessions =
   (global as any)._sessionManagerSessions || new Map<string, SessionManager>();
@@ -19,6 +20,9 @@ class SessionManager {
   /* Per-request tracer. The search agents replace it at the start of a
      request; everywhere else it stays a no-op that records nothing. */
   trace: Tracer = Tracer.noop();
+  /* Per-request research budgets (agents/search/budgets.ts). The Researcher
+     sets it; when unset nothing is limited. */
+  budget?: RequestBudget;
 
   constructor(id?: string) {
     this.id = id ?? crypto.randomUUID();

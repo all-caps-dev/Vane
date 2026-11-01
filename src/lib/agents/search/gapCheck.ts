@@ -1,4 +1,4 @@
-// TypeScript: the one bounded evidence-gap round after research (M3). One LLM check, at most 2 extra queries, never repeated.
+// TypeScript: one bounded evidence-gap round after research (M3). One LLM check, at most 2 extra queries. The researcher runs one round (balanced) or at most two (quality).
 import z from 'zod';
 import type BaseLLM from '@/lib/models/base/llm';
 import type SessionManager from '@/lib/session';
@@ -99,8 +99,9 @@ export type GapCheckResult = {
   3. show a 'gap_check' step;
   4. if gaps were named, run at most 2 of their queries through ONE search
      (which shows its own 'searching' step) and return the new passages.
-  Never recurses. A failing check or search is recorded and the request
-  carries on with the evidence it already has.
+  Never recurses; the researcher decides whether a second round runs
+  (quality only, budgets.ts MAX_GAP_ROUNDS). A failing check or search is
+  recorded and the request carries on with the evidence it already has.
 */
 export const runGapCheck = async (args: {
   llm: BaseLLM<any>;

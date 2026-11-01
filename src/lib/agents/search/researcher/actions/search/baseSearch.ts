@@ -31,8 +31,9 @@ import {
 type Trace = InstanceType<typeof SessionManager>['trace'];
 
 /* Mode settings for the evidence pipeline. */
-// How many top sources balanced and quality mode fetch and read.
-const PAGES_TO_READ = { balanced: 6, quality: 10 } as const;
+// How many top sources balanced and quality mode fetch and read per search.
+// The request-wide fetch budget (budgets.ts) caps the total across searches.
+export const PAGES_TO_READ = { balanced: 6, quality: 8 } as const;
 // How many pages are fetched at the same time.
 const FETCH_CONCURRENCY = 4;
 // Only the first chunks of a long page go to the reranker, so a 2-core box
@@ -105,6 +106,9 @@ type SearchInput = {
   // The standalone question; passages are ranked against it. When missing,
   // the queries joined by spaces are used.
   question?: string;
+  // False for the gap round's searches, which have their own cap (one or
+  // two rounds) and do not take from maxSearchCalls. Default true.
+  countsAsSearchCall?: boolean;
 };
 
 /*
@@ -117,12 +121,25 @@ type SearchInput = {
      sources, chunk each page by section, rerank page passages plus the
      snippets of pages that could not be read, select, return.
   4. Quality with reranker 'off': the pre-M2 LLM picker and extractor.
+  The request budget on the session (budgets.ts) is checked first: with no
+  search calls left this returns [] at once; with no fetches left it stops
+  reading pages and returns the selected snippets.
 */
 export const executeSearch = async (input: SearchInput): Promise<Chunk[]> => {
   const researchBlock = input.researchBlock;
   /* Per-request tracer; a no-op unless tracing is on. */
   const trace = input.session.trace;
+  /* Per-request budget; undefined (no limits) outside the Researcher. */
+  const requestBudget = input.session.budget;
   const question = input.question?.trim() || input.queries.join(' ');
+
+  if (
+    requestBudget &&
+    input.countsAsSearchCall !== false &&
+    !requestBudget.take('maxSearchCalls')
+  ) {
+    return [];
+  }
 
   researchBlock.data.subSteps.push({
     id: crypto.randomUUID(),
@@ -289,6 +306,12 @@ export const executeSearch = async (input: SearchInput): Promise<Chunk[]> => {
     }
   });
 
+  // No fetches left this request: the snippets are all there is.
+  if (requestBudget && requestBudget.remaining('maxFetches') === 0) {
+    requestBudget.markExhausted('maxFetches');
+    return finishSelection(rankedSnippets, budget, trace, reportRanking);
+  }
+
   const toRead = rankedSnippets
     .filter((s) => !alreadyRead.has(s.canonicalUrl))
     .slice(0, PAGES_TO_READ[input.mode === 'quality' ? 'quality' : 'balanced']);
@@ -320,11 +343,15 @@ export const executeSearch = async (input: SearchInput): Promise<Chunk[]> => {
   const readSource = async (snippet: Evidence): Promise<Evidence[]> => {
     let scraped: Awaited<ReturnType<typeof Scraper.scrape>> | undefined;
     try {
-      scraped = await Scraper.scrape(snippet.url, trace);
+      scraped = await Scraper.scrape(snippet.url, trace, requestBudget);
     } catch (err) {
       console.log('Error scraping data from', snippet.url, err);
       trace.error(`fetch ${snippet.url}`, err);
     }
+
+    // The fetch budget ran out while this search was reading: keep the
+    // snippet as a snippet (it was never fetched, so it did not fail).
+    if (scraped?.budgetExhausted) return [snippet];
 
     let chunks: ReturnType<typeof chunkText> = [];
     if (scraped && !scraped.failed) {
@@ -635,12 +662,14 @@ const legacyQualitySearch = async (
         const scrapedData = await Scraper.scrape(
           result.metadata.url,
           trace,
+          input.session.budget,
         ).catch((err) => {
           console.log('Error scraping data from', result.metadata.url, err);
           trace.error(`fetch ${result.metadata.url}`, err);
         });
 
-        if (!scrapedData) return;
+        // Nothing to extract when the fetch failed or the budget was spent.
+        if (!scrapedData || scrapedData.budgetExhausted) return;
 
         let accumulatedContent = '';
         const chunks = splitText(scrapedData.content, 4000, 500);

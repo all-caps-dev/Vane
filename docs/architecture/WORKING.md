@@ -55,7 +55,7 @@ Between searches the model does not see the full passages. It sees a short diges
 
 ### Checking for gaps
 
-In balanced and quality mode, once the loop stops, one more model call reads the question and the digest and says whether the evidence covers it, what is missing (with a query for each gap), and where sources disagree. If something is missing, up to two of those queries are searched once, and their passages join the rest. This happens at most once per question and is skipped when the loop already took more than a minute. What the check found is passed to the writer as notes, so the answer can say what could not be found.
+In balanced and quality mode, once the loop stops, one more model call reads the question and the digest and says whether the evidence covers it, what is missing (with a query for each gap), and where sources disagree. If something is missing, up to two of those queries are searched once, and their passages join the rest. Balanced mode does this once per question; quality mode may do it a second time when the first round found gaps and its search brought new sources. It is skipped when the loop already took more than a minute. What the check found is passed to the writer as notes, so the answer can say what could not be found.
 
 ### Reading web pages
 
@@ -63,7 +63,11 @@ When research needs the full text of a page, Vane first fetches it with a plain 
 
 ### Evidence
 
-Search results are turned into evidence before the answer is written. Every search result starts as a snippet. In speed mode the snippets are ranked against the question and the best are kept. In balanced and quality mode the top pages (6 or 10) are fetched and split along their headings into short passages; code blocks and tables are kept whole and every passage carries its section heading. A small cross-encoder model running on the CPU scores each passage against the question (falling back to embedding similarity if it cannot run), and a budget of passages is kept with a cap per page and a minimum number of different pages. Each passage has a stable id, and each is labelled as a page passage or a search snippet so the writer knows which is which. The writer sees passages grouped by page, and `[N]` in the answer refers to page N in the source list.
+Search results are turned into evidence before the answer is written. Every search result starts as a snippet. In speed mode the snippets are ranked against the question and the best are kept. In balanced and quality mode the top pages (6 or 8 per search) are fetched and split along their headings into short passages; code blocks and tables are kept whole and every passage carries its section heading. A small cross-encoder model running on the CPU scores each passage against the question (falling back to embedding similarity if it cannot run), and a budget of passages is kept with a cap per page and a minimum number of different pages. Each passage has a stable id, and each is labelled as a page passage or a search snippet so the writer knows which is which. The writer sees passages grouped by page, and `[N]` in the answer refers to page N in the source list.
+
+### What quality mode means
+
+Quality mode is not "search until something runs out" any more. It asks the researcher to cover the question from at least three independent sources, to look once for a source that disagrees or qualifies them, and then to stop. Every request also has hard limits enforced in code: quality mode gets at most 6 research iterations, 8 searches, 24 page fetches (6 of them in the headless browser) and 180 seconds of research, then up to two gap rounds and the answer. Balanced and speed mode have smaller limits of the same kind. A PDF or other download is never opened in the browser. The limits are tuned for a 2-core, 4 GB server and can be changed with environment variables; see the Budgets section of docs/EVAL.md.
 
 ## Answer generation
 

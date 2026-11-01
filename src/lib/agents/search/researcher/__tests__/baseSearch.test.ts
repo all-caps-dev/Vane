@@ -31,6 +31,7 @@ vi.mock('@huggingface/transformers', () => {
 
 import { executeSearch } from '@/lib/agents/search/researcher/actions/search/baseSearch';
 import { Tracer } from '@/lib/trace';
+import { RequestBudget } from '@/lib/agents/search/budgets';
 import { ResearchBlock } from '@/lib/types';
 
 // Embeds text as a 2D vector: texts mentioning "cat" point one way, the
@@ -45,6 +46,8 @@ const run = (
     mode?: 'speed' | 'balanced' | 'quality';
     question?: string;
     llm?: any;
+    budget?: RequestBudget;
+    countsAsSearchCall?: boolean;
   } = {},
 ) => {
   const trace = new Tracer('on');
@@ -60,9 +63,10 @@ const run = (
     mode: opts.mode ?? 'speed',
     question: opts.question,
     researchBlock,
-    session: { trace, updateBlock: vi.fn() } as any,
+    session: { trace, updateBlock: vi.fn(), budget: opts.budget } as any,
     llm: opts.llm ?? ({} as any),
     embedding: { embedText } as any,
+    countsAsSearchCall: opts.countsAsSearchCall,
   });
   return { promise, errorSpy, eventSpy, researchBlock };
 };
@@ -294,5 +298,91 @@ describe('executeSearch (quality, reranker off)', () => {
     expect(out).toHaveLength(1);
     expect(out[0].content).toContain('cats eat fish');
     expect(out[0].metadata.url).toBe('https://a.test/');
+  });
+});
+
+describe('executeSearch (request budget)', () => {
+  const budgetOf = (maxSearchCalls: number, maxFetches: number) =>
+    new RequestBudget({
+      maxSearchCalls,
+      maxFetches,
+      maxBrowserFetches: 1,
+      maxResearchMs: 60_000,
+    });
+
+  it('returns nothing once the search calls are spent, except for the gap round', async () => {
+    searchSearxng.mockResolvedValue(
+      results(['Cats', 'https://a.test/', 'cat']),
+    );
+    const budget = budgetOf(1, 0);
+
+    expect(await run(['one'], { budget }).promise).toHaveLength(1);
+    const refused = run(['two'], { budget });
+    expect(await refused.promise).toEqual([]);
+    expect(refused.researchBlock.data.subSteps).toEqual([]);
+    expect(searchSearxng).toHaveBeenCalledTimes(1);
+    expect(budget.isExhausted('maxSearchCalls')).toBe(true);
+
+    // Gap searches have their own cap and still run.
+    const gap = run(['three'], { budget, countsAsSearchCall: false });
+    expect(await gap.promise).toHaveLength(1);
+  });
+
+  it('reads no pages when the fetch budget is spent and keeps the snippets', async () => {
+    searchSearxng.mockResolvedValue(
+      results(
+        ['Cats', 'https://a.test/', 'cat snippet'],
+        ['Dogs', 'https://b.test/', 'dog snippet'],
+      ),
+    );
+    const budget = budgetOf(4, 0);
+
+    const out = await run(['cat'], { mode: 'quality', budget }).promise;
+
+    expect(scrape).not.toHaveBeenCalled();
+    expect(out.every((c) => c.metadata.sourceKind === 'search_snippet')).toBe(
+      true,
+    );
+    expect(budget.isExhausted('maxFetches')).toBe(true);
+  });
+
+  it('keeps a page the budget stopped mid-search as a plain snippet', async () => {
+    searchSearxng.mockResolvedValue(
+      results(
+        ['Cats', 'https://a.test/', 'cat snippet'],
+        ['Dogs', 'https://b.test/', 'dog snippet'],
+      ),
+    );
+    scrape.mockImplementation(async (url: string) =>
+      url.includes('a.test')
+        ? {
+            title: 'Cat page',
+            content: '',
+            html: page('cat'),
+            text: 'x'.repeat(800),
+            fetchedAt: '2026-10-31T00:00:00.000Z',
+          }
+        : {
+            title: 'Failed to scrape',
+            content: '',
+            text: '',
+            fetchedAt: '2026-10-31T00:00:00.000Z',
+            failed: true,
+            budgetExhausted: true,
+          },
+    );
+
+    const out = await run(['cat'], {
+      mode: 'balanced',
+      budget: budgetOf(4, 1),
+    }).promise;
+
+    const dog = out.find((c) => c.metadata.url === 'https://b.test/');
+    expect(dog?.metadata).toMatchObject({
+      sourceKind: 'search_snippet',
+      extraction: 'ok',
+    });
+    // The scraper got the request budget to take from.
+    expect(scrape.mock.calls[0][2]).toBeInstanceOf(RequestBudget);
   });
 });
