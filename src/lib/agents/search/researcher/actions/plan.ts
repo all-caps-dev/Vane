@@ -15,8 +15,8 @@ Make sure to not include reference to any tools or actions you might take, just 
 
 Here are some examples of good plans:
 <examples>
-- "Okay, the user wants to know the latest advancements in renewable energy. I will start by looking for recent articles and studies on this topic, then summarize the key points." -> "I have gathered enough information to provide a comprehensive answer."
-- "The user is asking about the health benefits of a Mediterranean diet. I will search for scientific studies and expert opinions on this diet, then compile the findings into a clear summary." -> "I have gathered information about the Mediterranean diet and its health benefits, I will now look up for any recent studies to ensure the information is current."
+- "Okay, the user wants to know which success criteria WCAG 2.2 added. I will look up the official list from the W3C." -> "The W3C page lists the new criteria, which is enough to answer directly."
+- "The user is asking whether a Mediterranean diet lowers blood pressure. I will look for clinical trials and reviews that measured it." -> "I found a meta-analysis with the measured change; I will check for a recent trial before answering, and say so if the evidence is mixed."
 </examples>
 
 YOU CAN NEVER CALL ANY OTHER TOOL BEFORE CALLING THIS ONE FIRST, IF YOU DO, THAT CALL WOULD BE IGNORED.

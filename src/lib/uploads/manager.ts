@@ -2,10 +2,17 @@ import path from "path";
 import BaseEmbedding from "../models/base/embedding"
 import crypto from "crypto"
 import fs from 'fs';
-import { splitText } from "../utils/splitText";
+import { chunkText } from "../utils/chunkDocument";
 import { PDFParse } from 'pdf-parse';
 import { CanvasFactory } from 'pdf-parse/worker';
 import officeParser from 'officeparser'
+
+/* Splits an upload's text into passages with the same chunker web pages use
+   for plain text (paragraph and sentence aware, at most 350 tokens). Only
+   the text is stored, so the .content.json format ({ content, embedding }
+   per chunk) is unchanged and files uploaded before this still load. */
+const uploadChunks = (text: string): string[] =>
+    chunkText(text).map((chunk) => chunk.text);
 
 const supportedMimeTypes = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain'] as const
 
@@ -91,7 +98,7 @@ class UploadManager {
             case 'text/plain':
                 const content = fs.readFileSync(filePath, 'utf-8');
 
-                const splittedText = splitText(content, 512, 128)
+                const splittedText = uploadChunks(content)
                 const embeddings = await this.embeddingModel.embedText(splittedText)
 
                 if (embeddings.length !== splittedText.length) {
@@ -122,7 +129,7 @@ class UploadManager {
 
                 const pdfText = await parser.getText().then(res => res.text)
 
-                const pdfSplittedText = splitText(pdfText, 512, 128)
+                const pdfSplittedText = uploadChunks(pdfText)
                 const pdfEmbeddings = await this.embeddingModel.embedText(pdfSplittedText)
 
                 if (pdfEmbeddings.length !== pdfSplittedText.length) {
@@ -148,7 +155,7 @@ class UploadManager {
 
                 const docText = (await officeParser.parseOffice(docBuffer)).toText()
 
-                const docSplittedText = splitText(docText, 512, 128)
+                const docSplittedText = uploadChunks(docText)
                 const docEmbeddings = await this.embeddingModel.embedText(docSplittedText)
 
                 if (docEmbeddings.length !== docSplittedText.length) {
