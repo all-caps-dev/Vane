@@ -7,6 +7,7 @@ import {
 import { ActionRegistry } from './actions';
 import { getResearcherPrompt } from '@/lib/prompts/search/researcher';
 import SessionManager from '@/lib/session';
+import { getInternalThinking } from '@/lib/config/serverRegistry';
 import {
   Chunk,
   Message,
@@ -139,6 +140,8 @@ class Researcher {
           ...agentMessageHistory,
         ],
         tools: availableTools,
+        // The tool-calling planner is internal; the writer's call is not touched.
+        options: { thinking: getInternalThinking() },
       });
 
       const block = session.getBlock(researchBlockId);

@@ -2,6 +2,7 @@ import z from 'zod';
 import { Widget } from '../types';
 import YahooFinance from 'yahoo-finance2';
 import formatChatHistoryAsString from '@/lib/utils/formatHistory';
+import { getInternalThinking } from '@/lib/config/serverRegistry';
 
 const yf = new YahooFinance({
   suppressNotices: ['yahooSurvey'],
@@ -65,6 +66,8 @@ const stockWidget: Widget = {
         },
       ],
       schema,
+      // An internal call: may skip the model's thinking step (M4 setting).
+      options: { thinking: getInternalThinking() },
     });
 
     if (output.notPresent) {

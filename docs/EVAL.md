@@ -169,6 +169,10 @@ New trace fields:
 - `research` span: `loopMs` (the loop alone, which the 60 s gap budget uses) and `queriesRun` (count).
 - `gap` event: when it ran, `covered`, `gapCount`, `conflictCount`, `queriesRun` (the gap queries actually searched), `newSources` and `durationMs`; when skipped, `skipped` (`mode`, `time` or `no_web`) and `researchMs`; when the check failed, `error: true`.
 
+## M4: model thinking for internal calls
+
+DeepSeek V4.1 Flash on TensorFold thinks before every reply, including the small structured calls that only steer the search; a classifier-shaped call measured 5.4 s with thinking and 1.2 s without. The server-scope setting **Model thinking for internal calls** (key `internalThinking`, environment variable `VANE_INTERNAL_THINKING`, default `default`) set to `off` adds `chat_template_kwargs: { thinking: false }` to the request body of the classifier, the researcher loop's tool-calling planner, the gap check and the weather, stock and calculation widgets; the writer's answer, and the legacy picker and extractor, still think. Only the OpenAI provider sends the field (in `generateText`, `streamText` and `generateObject`), and only when the setting is `off`, because real OpenAI rejects unknown body fields; use it with an OpenAI-compatible server that honours `chat_template_kwargs.thinking`, such as vLLM, SGLang or TensorFold. Like the other select settings, the environment variable applies only while no value is saved.
+
 ## Run the tests
 
 ```
@@ -195,3 +199,31 @@ Each run writes two files to `--out`:
 - `summary-<mode>-<UTC stamp>.html`: one self-contained page. The summary table gives mean and p95 latency, mean source count, the share of answers citing a source number that does not exist, the mean required-fact hit rate, the abstain count and errors. Below it, one row per fixture; open "Full answer and sources" to see the whole answer.
 
 Fact hits are case-insensitive substring matches, so treat them as a smoke signal, not a grade.
+
+## Comparing runs
+
+`scripts/eval/compare.ts` puts two or more results files side by side in one self-contained HTML page. Runs may use different modes; each run's mode is shown next to its label.
+
+```
+node scripts/eval/compare.ts --run "baseline=data/eval/results-speed-<stamp>.jsonl" --run "M1=data/eval/results-speed-<stamp>.jsonl" --out data/eval/compare.html
+```
+
+The first `--run` is the baseline. The page has three sections:
+
+- **Summary:** one column per run. Fixtures run, succeeded, errors, mean, median and p95 latency, mean sources, the share of answers with zero sources and with out-of-range citations, total out-of-range citations, mean answer length, abstain count, abstained when expected (abstentions among fixtures with `expectAbstain`, over how many such fixtures succeeded) and mean acceptable-domain hits. The best value in each row is bold: lower for latency, errors, zero sources and out-of-range citations, higher for the rest. Fixtures run, answer length and abstain count are not ranked.
+- **Per fixture:** one row per fixture id (the union across runs), with latency in seconds, sources, out-of-range citations, abstained and any error for each run. A cell is red for an error or out-of-range citations, green when latency is at least 30% lower than the baseline. A fixture missing from a run shows `n/a`.
+- **Answers side by side:** one collapsed block per fixture with each run's answer (first 600 characters, full text in a nested block) and its sources.
+
+`--judge <file>` adds judged scores. The file is JSONL, one line per run and fixture, written by a person or a judging model after reading the answers:
+
+```json
+{
+  "run": "M1",
+  "id": "f01",
+  "factScore": 0.5,
+  "unsupportedClaims": ["Says 9.0 shipped in July"],
+  "notes": "Right Debian release, wrong month."
+}
+```
+
+`run` must match a `--run` label (other lines are skipped with a warning), `factScore` is 0 to 1, `unsupportedClaims` is empty when every claim is supported, and `notes` is optional. With a judge file the summary adds the mean judged fact score and the share of answers with at least one unsupported claim (lower is better), the matrix adds a Judged column, and the detail shows the claims and notes.

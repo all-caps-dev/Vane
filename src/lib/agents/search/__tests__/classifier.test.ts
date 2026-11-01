@@ -1,5 +1,14 @@
 // TypeScript: unit tests for the classifier schema (M3 fields) and classify() cleanup.
 import { describe, expect, it, vi } from 'vitest';
+
+// The real registry would read and write data/config.json. vi.hoisted makes
+// `settings` exist before the hoisted vi.mock factory runs.
+const settings = vi.hoisted(() => ({
+  thinking: 'default' as 'default' | 'off',
+}));
+vi.mock('@/lib/config/serverRegistry', () => ({
+  getInternalThinking: () => settings.thinking,
+}));
 import { classify, classifierSchema } from '@/lib/agents/search/classifier';
 import { classifierPrompt } from '@/lib/prompts/search/classifier';
 
@@ -87,6 +96,27 @@ describe('classify', () => {
     });
     expect(out.classification.entities).toEqual(['WCAG 2.2']);
     expect(llm.generateObject).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes the internal thinking setting to the model call', async () => {
+    const llm = {
+      generateObject: vi.fn(async (_input: any) => ({
+        classification: { ...base, entities: [] },
+        standaloneFollowUp: 'q',
+      })),
+    };
+    for (const thinking of ['off', 'default'] as const) {
+      settings.thinking = thinking;
+      await classify({
+        llm: llm as any,
+        enabledSources: ['web'],
+        query: 'q',
+        chatHistory: [],
+      });
+      expect(llm.generateObject.mock.lastCall?.[0].options).toEqual({
+        thinking,
+      });
+    }
   });
 });
 

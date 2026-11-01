@@ -59,3 +59,17 @@ export const getEvidenceBudget = (): number => {
   if (!Number.isFinite(parsed) || parsed < 1) return DEFAULT_EVIDENCE_BUDGET;
   return Math.min(parsed, 64);
 };
+
+/* ---------- Model thinking (M4) ---------- */
+
+export type InternalThinking = 'default' | 'off';
+
+/* Whether internal calls (classifier, research planner, gap check, widgets)
+   ask the server to skip thinking. Anything but 'off' means 'default', so
+   nothing extra is sent to a server that may reject it. */
+export const getInternalThinking = (): InternalThinking =>
+  String(configManager.getConfig('search.internalThinking', ''))
+    .trim()
+    .toLowerCase() === 'off'
+    ? 'off'
+    : 'default';

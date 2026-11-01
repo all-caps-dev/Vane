@@ -1,6 +1,7 @@
 import z from 'zod';
 import { Widget } from '../types';
 import formatChatHistoryAsString from '@/lib/utils/formatHistory';
+import { getInternalThinking } from '@/lib/config/serverRegistry';
 import { exp, evaluate as mathEval } from 'mathjs';
 
 const schema = z.object({
@@ -49,6 +50,8 @@ const calculationWidget: Widget = {
         },
       ],
       schema,
+      // An internal call: may skip the model's thinking step (M4 setting).
+      options: { thinking: getInternalThinking() },
     });
 
     if (output.notPresent) {
