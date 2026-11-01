@@ -19,5 +19,5 @@ const Rewrite = ({
     </button>
   );
 };
-1;
+
 export default Rewrite;

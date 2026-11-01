@@ -58,7 +58,7 @@ const MessageSources = ({ sources }: { sources: Chunk[] }) => {
           </p>
           <div className="flex flex-row items-center justify-between">
             <div className="flex flex-row items-center space-x-1">
-              {source.metadata.url.includes('file_id://') ? (
+              {isUpload(source.metadata.url) ? (
                 <div className="bg-dark-200 hover:bg-dark-100 transition duration-200 flex items-center justify-center w-6 h-6 rounded-full">
                   <File size={12} className="text-white/70" />
                 </div>
@@ -72,9 +72,7 @@ const MessageSources = ({ sources }: { sources: Chunk[] }) => {
                 />
               )}
               <p className="text-xs text-black/50 dark:text-white/50 overflow-hidden whitespace-nowrap text-ellipsis">
-                {source.metadata.url.includes('file_id://')
-                  ? 'Uploaded File'
-                  : source.metadata.url.replace(/.+\/\/|www.|\..+/g, '')}
+                {domainOf(source.metadata.url)}
               </p>
             </div>
             <div className="flex flex-row items-center space-x-1 text-black/50 dark:text-white/50 text-xs">
@@ -97,7 +95,7 @@ const MessageSources = ({ sources }: { sources: Chunk[] }) => {
             {sources
               .slice(VISIBLE_SOURCES, VISIBLE_SOURCES + 3)
               .map((source, i) => {
-                return source.metadata.url === 'File' ? (
+                return isUpload(source.metadata.url) ? (
                   <div
                     key={i}
                     className="bg-dark-200 hover:bg-dark-100 transition duration-200 flex items-center justify-center w-6 h-6 rounded-full"
@@ -133,7 +131,7 @@ const MessageSources = ({ sources }: { sources: Chunk[] }) => {
                 enterFrom="opacity-0 scale-95"
                 enterTo="opacity-100 scale-100"
                 leave="ease-in duration-100 motion-reduce:transition-none"
-                leaveFrom="opacity-100 scale-200"
+                leaveFrom="opacity-100 scale-100"
                 leaveTo="opacity-0 scale-95"
               >
                 <DialogPanel className="w-full max-w-md transform rounded-2xl bg-light-secondary dark:bg-dark-secondary border border-light-200 dark:border-dark-200 p-6 text-left align-middle shadow-xl transition-all">
@@ -159,7 +157,7 @@ const MessageSources = ({ sources }: { sources: Chunk[] }) => {
                         </p>
                         <div className="flex flex-row items-center justify-between">
                           <div className="flex flex-row items-center space-x-1">
-                            {source.metadata.url === 'File' ? (
+                            {isUpload(source.metadata.url) ? (
                               <div className="bg-dark-200 hover:bg-dark-100 transition duration-200 flex items-center justify-center w-6 h-6 rounded-full">
                                 <File size={12} className="text-white/70" />
                               </div>
@@ -173,10 +171,7 @@ const MessageSources = ({ sources }: { sources: Chunk[] }) => {
                               />
                             )}
                             <p className="text-xs text-black/50 dark:text-white/50 overflow-hidden whitespace-nowrap text-ellipsis">
-                              {source.metadata.url.replace(
-                                /.+\/\/|www.|\..+/g,
-                                '',
-                              )}
+                              {domainOf(source.metadata.url)}
                             </p>
                           </div>
                           <div className="flex flex-row items-center space-x-1 text-black/50 dark:text-white/50 text-xs">
