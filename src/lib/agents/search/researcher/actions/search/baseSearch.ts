@@ -330,7 +330,11 @@ export const executeSearch = async (input: SearchInput): Promise<Chunk[]> => {
     if (scraped && !scraped.failed) {
       try {
         chunks = scraped.html
-          ? chunkDocument(scraped.html, { url: snippet.url })
+          ? chunkDocument(scraped.html, {
+              url: snippet.url,
+              // Reuse the scraper's Readability pass instead of a second one.
+              articleHtml: scraped.articleHtml,
+            })
           : chunkText(scraped.text);
         // Readability found text but the walk found no blocks: use the text.
         if (chunks.length === 0 && scraped.text)

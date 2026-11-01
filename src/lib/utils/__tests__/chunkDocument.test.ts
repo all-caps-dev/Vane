@@ -1,5 +1,7 @@
 // TypeScript: unit tests for section-aware chunking in src/lib/utils/chunkDocument.ts.
 import { describe, expect, it } from 'vitest';
+import { JSDOM } from 'jsdom';
+import { Readability } from '@mozilla/readability';
 import { chunkDocument, chunkText } from '@/lib/utils/chunkDocument';
 import { getTokenCount } from '@/lib/utils/splitText';
 
@@ -118,6 +120,29 @@ describe('chunkDocument', () => {
     // The last block of one chunk is the first block of the next.
     const lastBlock = chunks[0].text.split('\n\n').pop()!;
     expect(chunks[1].text).toContain(lastBlock);
+  });
+
+  it('chunks pre-extracted article HTML the same as the full page', () => {
+    const page = doc(
+      `<h2>Install</h2>${filler('installing')}<h3>Linux</h3>${filler('linux')}<pre>npm   install</pre>`,
+    );
+    // What Scraper.scrape returns as articleHtml.
+    const articleHtml = new Readability(
+      new JSDOM(page).window.document,
+    ).parse()!.content!;
+
+    const fromPage = chunkDocument(page);
+    expect(fromPage.length).toBeGreaterThan(0);
+    expect(chunkDocument(page, { articleHtml })).toEqual(fromPage);
+    // The page html is not needed when the article is given.
+    expect(chunkDocument('', { articleHtml })).toEqual(fromPage);
+  });
+
+  it('falls back to the page when the given article HTML is empty', () => {
+    const page = doc(`<h2>Usage</h2>${filler('usage')}`);
+    expect(chunkDocument(page, { articleHtml: '<div> </div>' })).toEqual(
+      chunkDocument(page),
+    );
   });
 
   it('returns [] for empty input', () => {

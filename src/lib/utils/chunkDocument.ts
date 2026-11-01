@@ -337,7 +337,7 @@ const packBlocks = (blocks: Block[], maxTokens: number): DocumentChunk[] => {
   and the heading is lost with them. Lift such a heading out of its wrapper
   first so the section structure survives.
 */
-const liftWrappedHeadings = (document: Document) => {
+export const liftWrappedHeadings = (document: Document) => {
   document.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach((heading) => {
     const parent = heading.parentElement;
     if (!parent || !['DIV', 'HEADER', 'HGROUP'].includes(parent.tagName))
@@ -355,15 +355,33 @@ const liftWrappedHeadings = (document: Document) => {
   Chunks an HTML page. Readability picks the article; its `content` (HTML,
   not textContent) is walked so headings, code and tables keep their shape.
   When Readability finds nothing, the page body is used instead.
+
+  opts.articleHtml: Readability's article HTML that the caller already has
+  (Scraper.scrape returns it). When given and it holds text, the page is not
+  parsed and Readability does not run again; only the small article is
+  parsed. Without it (or when it is empty) `html` is handled as before.
 */
 export const chunkDocument = (
   html: string,
-  opts: { url?: string; maxTokens?: number } = {},
+  opts: { url?: string; maxTokens?: number; articleHtml?: string } = {},
 ): DocumentChunk[] => {
-  if (!html || !html.trim()) return [];
   const maxTokens = opts.maxTokens ?? DEFAULT_MAX_TOKENS;
 
   let root: Element | null = null;
+
+  // Fast path: the article was already extracted by the scraper.
+  if (opts.articleHtml && opts.articleHtml.trim()) {
+    try {
+      const articleDom = new JSDOM(`<body>${opts.articleHtml}</body>`);
+      const body = articleDom.window.document.body;
+      if (collapse(body.textContent ?? '')) root = body;
+    } catch {
+      root = null;
+    }
+    if (root) return packBlocks(extractBlocks(root), maxTokens);
+  }
+
+  if (!html || !html.trim()) return [];
 
   try {
     const page = new JSDOM(html, opts.url ? { url: opts.url } : undefined);

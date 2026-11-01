@@ -74,52 +74,48 @@ export const POST = async (req: Request) => {
       });
 
     if (!body.stream) {
-      return new Promise(
-        (
-          resolve: (value: Response) => void,
-          reject: (value: Response) => void,
-        ) => {
-          let message = '';
-          let sources: any[] = [];
+      /* Errors resolve with a 500 JSON body. Rejecting the promise with a
+         Response (as this used to) makes Next treat it as a thrown error
+         and send its own generic 500, so the client never saw this JSON. */
+      return new Promise((resolve: (value: Response) => void) => {
+        let message = '';
+        let sources: any[] = [];
 
-          session.subscribe((event: string, data: Record<string, any>) => {
-            if (event === 'data') {
-              try {
-                if (data.type === 'response') {
-                  message += data.data;
-                } else if (data.type === 'searchResults') {
-                  sources = data.data;
-                }
-              } catch (error) {
-                reject(
-                  Response.json(
-                    { message: 'Error parsing data' },
-                    { status: 500 },
-                  ),
-                );
+        session.subscribe((event: string, data: Record<string, any>) => {
+          if (event === 'data') {
+            try {
+              if (data.type === 'response') {
+                message += data.data;
+              } else if (data.type === 'searchResults') {
+                sources = data.data;
               }
-            }
-
-            if (event === 'end') {
-              /* Drop [n] markers past the last source. Streaming clients get
-                 the raw chunks and are not corrected. */
-              const { text } = sanitizeCitations(message, sources.length);
+            } catch (error) {
               resolve(
-                Response.json({ message: text, sources }, { status: 200 }),
-              );
-            }
-
-            if (event === 'error') {
-              reject(
                 Response.json(
-                  { message: 'Search error', error: data },
+                  { message: 'Error parsing data' },
                   { status: 500 },
                 ),
               );
             }
-          });
-        },
-      );
+          }
+
+          if (event === 'end') {
+            /* Drop [n] markers past the last source. Streaming clients get
+                 the raw chunks and are not corrected. */
+            const { text } = sanitizeCitations(message, sources.length);
+            resolve(Response.json({ message: text, sources }, { status: 200 }));
+          }
+
+          if (event === 'error') {
+            resolve(
+              Response.json(
+                { message: 'Search error', error: data },
+                { status: 500 },
+              ),
+            );
+          }
+        });
+      });
     }
 
     const encoder = new TextEncoder();

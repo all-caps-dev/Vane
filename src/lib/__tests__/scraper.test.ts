@@ -16,7 +16,30 @@ vi.mock('playwright', () => ({
   },
 }));
 
-import Scraper, { httpFetch, MIN_TEXT_CHARS } from '@/lib/scraper';
+// A stand-in undici Agent that records the options it was built with, so the
+// tests can call the pinned lookup the real Agent would use to connect.
+const agents = vi.hoisted(() => [] as { options: any; destroyed: boolean }[]);
+vi.mock('undici', () => ({
+  Agent: class {
+    record: { options: any; destroyed: boolean };
+    constructor(options: any) {
+      this.record = { options, destroyed: false };
+      agents.push(this.record);
+    }
+    async destroy() {
+      this.record.destroyed = true;
+    }
+  },
+}));
+
+import Scraper, {
+  HostVerdictCache,
+  httpFetch,
+  MIN_TEXT_CHARS,
+  pinnedLookup,
+  SUBRESOURCE_DNS_TTL_MS,
+  subresourceBlockReason,
+} from '@/lib/scraper';
 import { BlockedUrlError } from '@/lib/utils/safeUrl';
 
 const fetchMock = vi.fn();
@@ -57,6 +80,7 @@ beforeEach(() => {
       : [{ address: '93.184.216.34', family: 4 }],
   );
   fetchMock.mockReset();
+  agents.length = 0;
   vi.stubGlobal('fetch', fetchMock);
   vi.spyOn(console, 'log').mockImplementation(() => undefined);
 });
@@ -190,5 +214,144 @@ describe('Scraper.scrape', () => {
       fallbackReason: 'status 403',
       outcome: 'error',
     });
+  });
+});
+
+// Calls a dns.lookup-style function and returns what it answered.
+const callLookup = (
+  lookupFn: any,
+  host: string,
+  options: Record<string, unknown>,
+): Promise<{ err: any; address: any; family?: number }> =>
+  new Promise((resolve) =>
+    lookupFn(host, options, (err: any, address: any, family?: number) =>
+      resolve({ err, address, family }),
+    ),
+  );
+
+describe('DNS rebinding pin', () => {
+  it('connects each hop to the addresses the guard approved', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        reply('', 301, { location: 'https://other.test/final' }),
+      )
+      .mockResolvedValueOnce(reply('<p>hi</p>'));
+
+    const res = await httpFetch('https://site.test/start');
+    expect(res.ok).toBe(true);
+
+    // One DNS lookup per hop, by the guard; fetch never resolves on its own.
+    expect(lookup).toHaveBeenCalledTimes(2);
+    // Each fetch got its own pinned dispatcher, and both were closed.
+    expect(fetchMock.mock.calls[0][1].dispatcher).toBeDefined();
+    expect(fetchMock.mock.calls[1][1].dispatcher).toBeDefined();
+    expect(agents).toHaveLength(2);
+    expect(agents.every((a) => a.destroyed)).toBe(true);
+
+    // The second Agent's lookup answers for other.test with the approved IP.
+    const pinned = agents[1].options.connect.lookup;
+    expect(await callLookup(pinned, 'other.test', { all: true })).toEqual({
+      err: null,
+      address: [{ address: '93.184.216.34', family: 4 }],
+      family: undefined,
+    });
+    expect(await callLookup(pinned, 'other.test', {})).toMatchObject({
+      err: null,
+      address: '93.184.216.34',
+      family: 4,
+    });
+  });
+
+  it('keeps the original host name in the URL (Host header and SNI)', async () => {
+    fetchMock.mockResolvedValueOnce(reply('<p>hi</p>'));
+    await httpFetch('https://site.test/a');
+    expect(String(fetchMock.mock.calls[0][0])).toBe('https://site.test/a');
+  });
+
+  it('refuses any other host name and an unapproved family', async () => {
+    const lookupFn = pinnedLookup('site.test', [
+      { address: '93.184.216.34', family: 4 },
+    ]);
+    const other = await callLookup(lookupFn, 'evil.test', {});
+    expect(other.err?.code).toBe('ENOTFOUND');
+
+    const v6 = await callLookup(lookupFn, 'site.test', { family: 6 });
+    expect(v6.err?.code).toBe('ENOTFOUND');
+
+    // Case and a trailing dot do not matter.
+    const same = await callLookup(lookupFn, 'SITE.test.', {});
+    expect(same).toMatchObject({ err: null, address: '93.184.216.34' });
+  });
+});
+
+describe('subresourceBlockReason', () => {
+  it('blocks literal private hosts without DNS', async () => {
+    const cache: HostVerdictCache = new Map();
+    expect(
+      await subresourceBlockReason('http://127.0.0.1/x.png', cache),
+    ).toEqual({ blocked: true, reason: 'private address' });
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it('blocks a host that resolves privately', async () => {
+    const cache: HostVerdictCache = new Map();
+    expect(
+      await subresourceBlockReason('https://evil.test/a.js', cache),
+    ).toEqual({ blocked: true, reason: 'resolves to a private address' });
+  });
+
+  it('looks each host up once per 60 s', async () => {
+    const cache: HostVerdictCache = new Map();
+    const t0 = 1_000_000;
+
+    // Two images and a script from one host: one lookup between them.
+    await Promise.all([
+      subresourceBlockReason('https://cdn.test/a.png', cache, t0),
+      subresourceBlockReason('https://cdn.test/b.png', cache, t0),
+      subresourceBlockReason('https://CDN.test/c.js', cache, t0 + 1000),
+    ]);
+    expect(lookup).toHaveBeenCalledTimes(1);
+
+    // After the TTL the host is looked up again.
+    expect(
+      await subresourceBlockReason(
+        'https://cdn.test/d.png',
+        cache,
+        t0 + SUBRESOURCE_DNS_TTL_MS + 1,
+      ),
+    ).toBeNull();
+    expect(lookup).toHaveBeenCalledTimes(2);
+  });
+
+  it('aborts quietly (not a guard block) when the name does not resolve', async () => {
+    lookup.mockRejectedValueOnce(
+      Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' }),
+    );
+    const cache: HostVerdictCache = new Map();
+    expect(
+      await subresourceBlockReason('https://gone.test/a.png', cache),
+    ).toEqual({ blocked: false, reason: 'dns error' });
+  });
+});
+
+describe('Scraper.scrape articleHtml', () => {
+  it('returns the Readability article HTML next to the raw html', async () => {
+    const page = article(MIN_TEXT_CHARS * 2);
+    fetchMock.mockResolvedValueOnce(reply(page));
+
+    const res = await Scraper.scrape('https://site.test/a');
+
+    expect(res.html).toBe(page);
+    expect(res.articleHtml).toContain('word word');
+    expect(res.articleHtml).not.toContain('<title>');
+  });
+
+  it('leaves articleHtml undefined for text/plain', async () => {
+    fetchMock.mockResolvedValueOnce(
+      reply('plain '.repeat(200), 200, { 'content-type': 'text/plain' }),
+    );
+    const res = await Scraper.scrape('https://site.test/a.txt');
+    expect(res.html).toBeUndefined();
+    expect(res.articleHtml).toBeUndefined();
   });
 });

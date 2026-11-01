@@ -13,6 +13,7 @@ import {
   assertPublicHttpUrl,
   BlockedUrlError,
   isPrivateAddress,
+  resolvePublicHttpUrl,
 } from '@/lib/utils/safeUrl';
 
 beforeEach(() => {
@@ -40,6 +41,12 @@ describe('isPrivateAddress', () => {
     '::ffff:127.0.0.1',
     '::ffff:7f00:1',
     '::ffff:192.168.0.1',
+    // NAT64 64:ff9b::/96 (here 169.254.169.254 and 8.8.8.8 mapped in).
+    '64:ff9b::a9fe:a9fe',
+    '64:ff9b::169.254.169.254',
+    '64:ff9b::808:808',
+    // NAT64 local use, 64:ff9b:1::/48.
+    '64:ff9b:1::a00:1',
     'not-an-ip',
   ])('%s is private', (ip) => {
     expect(isPrivateAddress(ip)).toBe(true);
@@ -52,6 +59,9 @@ describe('isPrivateAddress', () => {
     '100.128.0.1',
     '2606:4700:4700::1111',
     '::ffff:8.8.8.8',
+    // Just outside the NAT64 prefixes.
+    '64:ff9b:2::1',
+    '64:ff9a::1',
   ])('%s is public', (ip) => {
     expect(isPrivateAddress(ip)).toBe(false);
   });
@@ -105,5 +115,33 @@ describe('assertPublicHttpUrl', () => {
     await expect(assertPublicHttpUrl('https://nope.example/')).rejects.toThrow(
       'ENOTFOUND',
     );
+  });
+
+  it('rejects a NAT64 literal host without DNS', async () => {
+    await expect(
+      assertPublicHttpUrl('http://[64:ff9b::a9fe:a9fe]/'),
+    ).rejects.toBeInstanceOf(BlockedUrlError);
+    expect(lookup).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolvePublicHttpUrl', () => {
+  it('returns the checked addresses for the pin', async () => {
+    lookup.mockResolvedValue([
+      { address: '93.184.216.34', family: 4 },
+      { address: '2606:2800:220:1::1', family: 6 },
+    ]);
+    const { url, addresses } = await resolvePublicHttpUrl('https://a.test/x');
+    expect(url.hostname).toBe('a.test');
+    expect(addresses).toEqual([
+      { address: '93.184.216.34', family: 4 },
+      { address: '2606:2800:220:1::1', family: 6 },
+    ]);
+  });
+
+  it('returns a literal IP as its own address, without DNS', async () => {
+    const { addresses } = await resolvePublicHttpUrl('http://8.8.8.8/');
+    expect(addresses).toEqual([{ address: '8.8.8.8', family: 4 }]);
+    expect(lookup).not.toHaveBeenCalled();
   });
 });
