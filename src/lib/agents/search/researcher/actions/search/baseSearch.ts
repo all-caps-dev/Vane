@@ -13,6 +13,7 @@ import z from 'zod';
 import Scraper, { MIN_TEXT_CHARS } from '@/lib/scraper';
 import { splitText } from '@/lib/utils/splitText';
 import { normalizeUrl } from '@/lib/utils/normalizeUrl';
+import { MAX_QUERIES_PER_CALL } from './queryPlan';
 import { chunkDocument, chunkText } from '@/lib/utils/chunkDocument';
 import {
   Evidence,
@@ -163,6 +164,19 @@ export const executeSearch = async (input: SearchInput): Promise<Chunk[]> => {
     ? input.prefetch.claim(input.queries, input.searchConfig)
     : null;
   const extraQuery = prefetched?.mode === 'extra' ? prefetched : null;
+
+  /* The prefetch counts against the per-call query cap: with it merged as
+     an extra query, at most MAX_QUERIES_PER_CALL queries reach SearXNG per
+     search. Planned queries come first by purpose, so the last one goes.
+     (2026-11-01: a day of evals at ~4 queries per question got brave and
+     google cse suspended for "too many requests" and every answer abstained.) */
+  if (extraQuery && input.queries.length >= MAX_QUERIES_PER_CALL) {
+    trace.event('search.trimmed', {
+      dropped: input.queries.slice(MAX_QUERIES_PER_CALL - 1),
+      reason: 'prefetch counts against the query cap',
+    });
+    input.queries = input.queries.slice(0, MAX_QUERIES_PER_CALL - 1);
+  }
 
   researchBlock.data.subSteps.push({
     id: crypto.randomUUID(),

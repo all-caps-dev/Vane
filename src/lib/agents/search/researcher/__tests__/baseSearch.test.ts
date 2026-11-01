@@ -572,3 +572,30 @@ describe('executeSearch with a prefetched query (Fleet #346)', () => {
     expect(out.map((c) => c.metadata.url)).toEqual(['https://a.test/']);
   });
 });
+
+describe('executeSearch: the prefetch counts against the query cap', () => {
+  it('trims three planned queries to two when the prefetch is merged as extra', async () => {
+    const { Prefetch } = await import('@/lib/agents/search/prefetch');
+    const prefetch = new Prefetch(
+      'what should my cat eat',
+      new Tracer('off'),
+      vi.fn(async () => results(['Extra', 'https://extra.test/', 'cat diet'])),
+    );
+    searchSearxng.mockResolvedValue(
+      results(['Cats', 'https://a.test/', 'about cat food']),
+    );
+
+    const { promise, researchBlock } = run(['one', 'two', 'three'], {
+      prefetch,
+    });
+    await promise;
+
+    // Two planned queries went to SearXNG; the third was dropped.
+    expect(searchSearxng).toHaveBeenCalledTimes(2);
+    expect(searchSearxng.mock.calls.map((c) => c[0])).toEqual(['one', 'two']);
+    expect(researchBlock.data.subSteps[0]).toMatchObject({
+      type: 'searching',
+      searching: ['one', 'two', 'what should my cat eat'],
+    });
+  });
+});
