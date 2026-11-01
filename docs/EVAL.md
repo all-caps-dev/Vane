@@ -26,7 +26,14 @@ The date is UTC. The folder is created on demand. API keys, base URLs and Author
 Top-level fields: `requestId`, `startedAt` (UTC), `traceMode` (`on` or `full`), `totalMs`, `agent` (`chat` for the web UI, `api` for `/api/search`), `mode` (speed, balanced, quality), `sourceCount`, `citations`, `errors`, `spans` and `events`. Span and event times are milliseconds since the request started.
 
 Spans: `classify`, `widgets`, `research`, `embed` (speed and balanced), `pick` (quality), `write`.
-Events: `request`, `research.iteration`, `research.actions`, `search.query`, `fetch`, `extract`, `dedup`, `sources`, `citations`.
+Events: `request`, `research.iteration`, `research.actions`, `search.query`, `fetch`, `extract`, `dedup`, `sources`, `citations`, `citations.removed`.
+
+Fields added in M1:
+
+- `embed` span: `count` (texts embedded in the one batched call: the query plus every result) and `durationMs`.
+- `fetch` event: `method` (`http` or `browser`, whichever produced the returned text), `httpStatus` (status of the plain HTTP attempt), `fallbackReason` (why the browser was tried: `thin`, `status 403`, `content-type`, `timeout`, `redirects`, `error ...`), `outcome` (`ok`, `empty`, `blocked`, `error`), and `blocked: true` with `reason` when the private-address guard refused the URL or a redirect. `browserError` appears when the browser failed and the thin HTTP text was used instead.
+- `citations.removed` event (chat UI only): `removed` (the out-of-range numbers taken out of the answer) and `sourceCount`; the top-level `citationsRemoved` gives the count. The `citations` event and summary still describe the answer as the model wrote it, before cleanup.
+- `errors` now also holds `search.query: ...` (one failed SearXNG query) and `action <name>: ...` (one failed research action). Neither stops the request any more.
 
 Example (`on` mode, shortened):
 
@@ -101,6 +108,17 @@ Example (`on` mode, shortened):
 ```
 
 To read today's traces: `tail -n 1 data/traces/$(date -u +%F).jsonl | npx prettier --parser json`.
+
+## What M1 changed
+
+M1 is about robustness and speed. Prompts are unchanged.
+
+- **Failure isolation.** A failing SearXNG query or research action is recorded in `errors` and the rest of the search carries on; if every query fails the search returns no results instead of throwing. Research action results now keep the order of the tool calls they answer. When the pipeline does throw, the agent emits an `error` event so `/api/chat` and `/api/search` close the response instead of hanging. `splitText` no longer loops forever on a single passage longer than the chunk size.
+- **Speed.** In speed and balanced mode each query makes one batched embedding call (query plus all results) instead of one call per result. Thresholds and output are unchanged.
+- **URL dedup.** Sources are deduplicated on a normalised key (no tracking params or fragment, http equals https, no trailing slash). The original link is still what is shown.
+- **Citation cleanup.** After the answer finishes, `[n]` markers that point past the last source are removed (code and links are untouched). The chat UI gets one final update and the stored message holds the clean text; `/api/search` without `stream` returns the clean text. Streaming `/api/search` clients receive the raw chunks and are **not** corrected.
+- **Fetching.** Pages are fetched with plain HTTP first and the headless browser only when that fails or returns under 400 characters of text. A private-address guard refuses localhost, private, link-local and tailnet addresses on every hop. See docs/architecture/WORKING.md.
+- **SearXNG options.** `time_range`, `language` and `safesearch` can be passed (no caller does yet), and unset options are no longer sent as the text `undefined`.
 
 ## Run the tests
 

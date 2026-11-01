@@ -42,6 +42,10 @@ If research is needed, we gather information in the background while widgets can
 
 Depending on configuration, research may include web lookup and searching user uploaded files.
 
+### Reading web pages
+
+When research needs the full text of a page, Vane first fetches it with a plain HTTP request (10 second timeout, at most 5 redirects, HTML or plain text only, at most 2 MB, no cookies) and extracts the readable text. The headless browser is started only when that request fails or the page has under 400 characters of readable text, which usually means it is built by JavaScript. Before anything is fetched, a guard resolves the host name and refuses the URL if any address is private: loopback, 10/8, 172.16/12, 192.168/16, link-local (including the 169.254.169.254 cloud metadata address), 100.64/10, IPv6 local ranges, and names ending in `.local`, `.internal` or `.ts.net`. The guard runs again on every redirect, and inside the browser every page and frame request is checked the same way, so a public page cannot redirect the fetcher onto the local network. A refused URL is reported as a failed read, never as an error.
+
 ## Answer generation
 
 Once we have enough context, the chat model generates the final response.

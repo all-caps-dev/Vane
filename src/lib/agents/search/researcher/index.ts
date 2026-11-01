@@ -5,6 +5,7 @@ import SessionManager from '@/lib/session';
 import { Message, ReasoningResearchBlock } from '@/lib/types';
 import formatChatHistoryAsString from '@/lib/utils/formatHistory';
 import { ToolCall } from '@/lib/models/types';
+import { normalizeUrl } from '@/lib/utils/normalizeUrl';
 
 class Researcher {
   async research(
@@ -211,15 +212,22 @@ class Researcher {
       .filter((a) => a.type === 'search_results')
       .flatMap((a) => a.results);
 
+    /* Dedup by a normalised KEY (normalizeUrl.ts: no tracking params, no
+       fragment, http = https, no trailing slash). metadata.url keeps the
+       original link for display. */
     const seenUrls = new Map<string, number>();
 
     const filteredSearchResults = searchResults
       .map((result, index) => {
-        if (result.metadata.url && !seenUrls.has(result.metadata.url)) {
-          seenUrls.set(result.metadata.url, index);
+        const key = result.metadata.url
+          ? normalizeUrl(result.metadata.url)
+          : '';
+
+        if (key && !seenUrls.has(key)) {
+          seenUrls.set(key, index);
           return result;
-        } else if (result.metadata.url && seenUrls.has(result.metadata.url)) {
-          const existingIndex = seenUrls.get(result.metadata.url)!;
+        } else if (key && seenUrls.has(key)) {
+          const existingIndex = seenUrls.get(key)!;
 
           const existingResult = searchResults[existingIndex];
 

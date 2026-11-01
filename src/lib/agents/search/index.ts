@@ -9,7 +9,8 @@ import { messages } from '@/lib/db/schema';
 import { and, eq, gt } from 'drizzle-orm';
 import { TextBlock } from '@/lib/types';
 import { getTokenCount } from '@/lib/utils/splitText';
-import { Tracer } from '@/lib/trace';
+import { sanitizeCitations } from '@/lib/utils/sanitizeCitations';
+import { Tracer, redactSecrets } from '@/lib/trace';
 import { startRequestTrace, traceAnswer, traceSources } from './trace';
 
 class SearchAgent {
@@ -22,6 +23,11 @@ class SearchAgent {
       await this.runSearch(session, input, tracer);
     } catch (err) {
       tracer.error('searchAsync', err);
+      /* Tell the route so it can close the stream (it used to hang). The
+         route forwards { data } to the client, so mask anything key-like. */
+      session.emit('error', {
+        data: redactSecrets(err instanceof Error ? err.message : String(err)),
+      });
       throw err;
     } finally {
       void tracer.finish();
@@ -223,12 +229,37 @@ class SearchAgent {
       }
     }
 
+    const sourceCount = searchResults?.searchFindings.length ?? 0;
+
+    /* Trace the answer as the model wrote it, so citation stats still show
+       how often the model cites a source that does not exist. */
     traceAnswer(tracer, writeSpan, {
       answer: answerText,
       writeStartedAt,
       timeToFirstChunkMs,
-      sourceCount: searchResults?.searchFindings.length ?? 0,
+      sourceCount,
     });
+
+    /* Remove [n] markers that point past the last source, with one final
+       patch, before 'end' so the UI and the stored blocks get clean text. */
+    const responseBlock = responseBlockId
+      ? (session.getBlock(responseBlockId) as TextBlock | undefined)
+      : undefined;
+
+    if (responseBlock) {
+      const { text, removed } = sanitizeCitations(
+        responseBlock.data,
+        sourceCount,
+      );
+
+      if (removed.length > 0) {
+        session.updateBlock(responseBlockId, [
+          { op: 'replace', path: '/data', value: text },
+        ]);
+        tracer.event('citations.removed', { removed, sourceCount });
+        tracer.annotate({ citationsRemoved: removed.length });
+      }
+    }
 
     session.emit('end', {});
 

@@ -79,6 +79,12 @@ class ActionRegistry {
     return action.execute(params, additionalConfig);
   }
 
+  /*
+    Runs every tool call in parallel. The result array is in CALL order
+    (results[i] belongs to actions[i]); the Researcher relies on that to pair
+    each result with its tool call id. A failing action does not reject the
+    batch: it is recorded on the trace and gives an empty search result.
+  */
   static async executeAll(
     actions: ToolCall[],
     additionalConfig: AdditionalConfig & {
@@ -87,20 +93,24 @@ class ActionRegistry {
       mode: SearchAgentConfig['mode'];
     },
   ): Promise<ActionOutput[]> {
-    const results: ActionOutput[] = [];
-
-    await Promise.all(
-      actions.map(async (actionConfig) => {
-        const output = await this.execute(
-          actionConfig.name,
-          actionConfig.arguments,
-          additionalConfig,
-        );
-        results.push(output);
+    return Promise.all(
+      actions.map(async (actionConfig): Promise<ActionOutput> => {
+        try {
+          return await this.execute(
+            actionConfig.name,
+            actionConfig.arguments,
+            additionalConfig,
+          );
+        } catch (err) {
+          console.log(`Action ${actionConfig.name} failed:`, err);
+          additionalConfig.session.trace.error(
+            `action ${actionConfig.name}`,
+            err,
+          );
+          return { type: 'search_results', results: [] };
+        }
       }),
     );
-
-    return results;
   }
 }
 

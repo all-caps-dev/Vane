@@ -5,7 +5,7 @@ import Researcher from './researcher';
 import { getWriterPrompt } from '@/lib/prompts/search/writer';
 import { WidgetExecutor } from './widgets';
 import { getTokenCount } from '@/lib/utils/splitText';
-import { Tracer } from '@/lib/trace';
+import { Tracer, redactSecrets } from '@/lib/trace';
 import { startRequestTrace, traceAnswer, traceSources } from './trace';
 
 class APISearchAgent {
@@ -18,6 +18,11 @@ class APISearchAgent {
       await this.runSearch(session, input, tracer);
     } catch (err) {
       tracer.error('searchAsync', err);
+      /* Tell the route so it can close the stream (it used to hang). The
+         route forwards { data } to the client, so mask anything key-like. */
+      session.emit('error', {
+        data: redactSecrets(err instanceof Error ? err.message : String(err)),
+      });
       throw err;
     } finally {
       void tracer.finish();

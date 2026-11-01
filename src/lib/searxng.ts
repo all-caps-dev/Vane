@@ -6,6 +6,8 @@ export interface SearxngSearchOptions {
   engines?: string[];
   language?: string;
   pageno?: number;
+  time_range?: 'day' | 'week' | 'month' | 'year';
+  safesearch?: 0 | 1 | 2;
 }
 
 interface SearxngSearchResult {
@@ -18,6 +20,33 @@ interface SearxngSearchResult {
   author?: string;
   iframe_src?: string;
 }
+
+/*
+  Builds the SearXNG request URL. Arrays are joined with commas; undefined
+  and null options are skipped (they used to become the text "undefined").
+*/
+export const buildSearxngUrl = (
+  baseUrl: string,
+  query: string,
+  opts?: SearxngSearchOptions,
+): URL => {
+  const url = new URL(`${baseUrl}/search?format=json`);
+  url.searchParams.append('q', query);
+
+  if (opts) {
+    Object.keys(opts).forEach((key) => {
+      const value = opts[key as keyof SearxngSearchOptions];
+      if (value === undefined || value === null) return;
+      if (Array.isArray(value)) {
+        url.searchParams.append(key, value.join(','));
+        return;
+      }
+      url.searchParams.append(key, String(value));
+    });
+  }
+
+  return url;
+};
 
 export const searchSearxng = async (
   query: string,
@@ -38,19 +67,7 @@ export const searchSearxng = async (
       ...data,
     });
 
-  const url = new URL(`${searxngURL}/search?format=json`);
-  url.searchParams.append('q', query);
-
-  if (opts) {
-    Object.keys(opts).forEach((key) => {
-      const value = opts[key as keyof SearxngSearchOptions];
-      if (Array.isArray(value)) {
-        url.searchParams.append(key, value.join(','));
-        return;
-      }
-      url.searchParams.append(key, value as string);
-    });
-  }
+  const url = buildSearxngUrl(searxngURL, query, opts);
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000);

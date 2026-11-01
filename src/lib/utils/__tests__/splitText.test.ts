@@ -49,3 +49,21 @@ describe('splitText', () => {
     expect(chunks.join('')).toBe(longText);
   });
 });
+
+describe('splitText with an oversized segment', () => {
+  // One long run with no split points (no ". ", newline, etc.).
+  const giant = 'word '.repeat(300).trim();
+
+  it('returns a segment larger than maxTokens as its own chunk', () => {
+    expect(splitText(giant, 50, 10)).toEqual([giant]);
+  });
+
+  it('keeps going past an oversized segment in the middle', () => {
+    const text = `Short start. ${giant}\nShort end. `;
+    const chunks = splitText(text, 50, 0);
+
+    expect(chunks.join('')).toBe(text);
+    expect(chunks.some((c) => c.includes(giant))).toBe(true);
+    expect(chunks[chunks.length - 1]).toContain('Short end.');
+  });
+});
