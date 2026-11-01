@@ -14,6 +14,24 @@ Vane is a **privacy-focused AI answering engine** that runs entirely on your own
 
 Want to know more about its architecture and how it works? You can read it [here](https://github.com/ItzCrazyKns/Vane/tree/master/docs/architecture/README.md).
 
+## About this fork
+
+This is [all-caps-dev/Vane](https://github.com/all-caps-dev/Vane), a fork of [ItzCrazyKns/Vane](https://github.com/ItzCrazyKns/Vane) 1.12.2 focused on retrieval quality: read pages instead of snippets, rank passages before writing, cite only what the evidence supports, and measure every change. Perplexity is the bar. Everything upstream still works; the changes add settings, tests and tooling and change the default search behaviour.
+
+**What is different**
+
+- **Search by default.** The classifier only skips search for greetings, rewriting text you pasted, pure arithmetic, questions about the chat itself, an explicit "do not search", or a plain weather or stock question the widget answers. It also returns the question's freshness, the entities that queries must keep verbatim, and the intent.
+- **Pages, not snippets.** Balanced and quality modes fetch the top pages over plain HTTP (10 s, 2 MB, content-type check, redirects re-validated; the headless browser only as a fallback), split them into section-aware passages that keep headings, tables and code whole, and rank every passage with an in-process cross-encoder (`Xenova/ms-marco-MiniLM-L-6-v2`, CPU, no extra service). A budget with a per-source cap and a minimum of distinct sources picks what the writer sees. Speed mode ranks snippets only.
+- **Citations that point at something.** Every passage has a stable id and a kind (`full_page`, `search_snippet`, `upload`). The writer is told to cite a source only when its passage supports the sentence, never to invent numbers, and to say what the sources do not state. Any `[n]` past the last source is removed from the final answer.
+- **Purpose-driven queries and one gap round.** The research loop plans queries with a purpose (primary, official docs, issues, independent, recent, comparison side), never repeats one, and gets a one-line digest per source instead of whole passages. After research, one bounded coverage check may run at most two extra queries, never recursively.
+- **Robust.** One failed search engine query or page does not fail the request; failed requests close the stream instead of hanging; the embedding model is loaded once per process (upstream loaded it per request and ran out of memory after about 30 questions); a private-address guard blocks fetches to loopback, RFC1918, link-local, CGNAT, cloud metadata and `.local`/`.ts.net` hosts on every redirect hop.
+- **Observable.** Settings > Search > **Trace logging** writes one JSON line per request to `data/traces/` with stage timings, queries, URLs, fetch outcomes and a citation scan. `npm test` runs 175 unit tests. `scripts/eval/run.ts` replays a fixture set against `/api/search`; `scripts/eval/compare.ts` renders runs side by side.
+- **Faster on thinking models.** Settings > Search > **Model thinking for internal calls** can turn thinking off for the classifier, planner, coverage check and widgets (servers that honour `chat_template_kwargs.thinking`, such as vLLM, SGLang and TensorFold); the writer still thinks.
+
+**New settings** (Settings > Search, each with an environment variable): Trace logging (`VANE_TRACE`), Reranker (`VANE_RERANKER`: `transformers`, `embedding`, `off`), Reranker model (`VANE_RERANKER_MODEL`), Read pages in balanced mode (`VANE_BALANCED_READS_PAGES`), Evidence budget (`VANE_EVIDENCE_BUDGET`), Model thinking for internal calls (`VANE_INTERNAL_THINKING`). Set the reranker to `off` to get the upstream quality-mode behaviour back.
+
+**Measured** on 30 real questions with DeepSeek V4.1 Flash on one box, before and after: speed mode mean 43 s to 20 s (p95 84 s to 40 s), balanced mean 70 s to 41 s (p95 156 s to 81 s); answers with zero sources 15 to 0; answers citing a source that does not exist 23 to 35 percent to 0; fact score by an LLM judge 0.44 to 0.65 (speed) and 0.46 to 0.74 (balanced). Details in [docs/EVAL.md](docs/EVAL.md); the pipeline is described in [docs/architecture/WORKING.md](docs/architecture/WORKING.md).
+
 ## ✨ Features
 
 🤖 **Support for all major AI providers** - Use local LLMs through Ollama or connect to OpenAI, Anthropic Claude, Google Gemini, Groq, and more. Mix and match models based on your needs.
