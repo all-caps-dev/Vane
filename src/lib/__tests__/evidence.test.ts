@@ -245,3 +245,43 @@ describe('groupBySource and the writer context', () => {
     expect(context).toContain('index=3 url="file_id://123"');
   });
 });
+
+describe('groupBySource bestScore', () => {
+  it('attaches the max passage score without changing [N] order or the writer context', () => {
+    // Source sa appears first but scores lower than sb.
+    const a0 = evidenceToChunk({ ...ev('sa', 0, words(1)), score: 0.2 });
+    const a1 = evidenceToChunk({ ...ev('sa', 1, words(2)), score: 0.4 });
+    const b0 = evidenceToChunk({ ...ev('sb', 0, words(3)), score: 0.9 });
+    const c0 = evidenceToChunk(ev('sc', 0, words(4))); // never reranked
+
+    const groups = groupBySource([a0, b0, a1, c0]);
+
+    // First-appearance order is kept: citations depend on it.
+    expect(groups.map((g) => [g.index, g.sourceId])).toEqual([
+      [1, 'sa'],
+      [2, 'sb'],
+      [3, 'sc'],
+    ]);
+    expect(groups.map((g) => g.bestScore)).toEqual([0.4, 0.9, undefined]);
+
+    // The card carries it; a source with no score gets no key at all.
+    expect(sourceCard(groups[0]).metadata.bestScore).toBe(0.4);
+    expect('bestScore' in sourceCard(groups[2]).metadata).toBe(false);
+
+    // The writer never sees it.
+    expect(formatSourcesForWriter(groups)).not.toContain('bestScore');
+  });
+
+  it('scores only the passages kept after snippets of a read page are dropped', () => {
+    const snippet = evidenceToChunk({
+      ...ev('sa', 0, words(5)),
+      sourceKind: 'search_snippet',
+      score: 0.99,
+    });
+    const page = evidenceToChunk({ ...ev('sa', 1, words(6)), score: 0.5 });
+
+    const [group] = groupBySource([snippet, page]);
+    expect(group.kind).toBe('full_page');
+    expect(group.bestScore).toBe(0.5);
+  });
+});

@@ -10,8 +10,8 @@ import {
   ListOrdered,
   ClipboardCheck,
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { useEffect, useState } from 'react';
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
+import { MutableRefObject, useEffect, useId, useRef, useState } from 'react';
 import { ResearchBlock, ResearchBlockSubStep } from '@/lib/types';
 import { useChat } from '@/lib/hooks/useChat';
 
@@ -68,33 +68,151 @@ const getStepTitle = (
   return 'Processing';
 };
 
+/* What a screen reader hears when a step starts. Generic on purpose: counts
+   are not known yet while the step is still streaming. */
+const getStepStartAnnouncement = (step: ResearchBlockSubStep): string => {
+  switch (step.type) {
+    case 'reasoning':
+      return 'Thinking';
+    case 'searching':
+      return 'Searching the web';
+    case 'upload_searching':
+      return 'Scanning your uploaded documents';
+    case 'search_results':
+      return 'Collecting results';
+    case 'reading':
+    case 'upload_search_results':
+      return 'Reading sources';
+    case 'ranking':
+      return 'Ranking passages';
+    case 'gap_check':
+      return 'Checking coverage';
+    default:
+      return 'Working';
+  }
+};
+
+// What a screen reader hears when a step is finished, with its final counts.
+const getStepDoneAnnouncement = (step: ResearchBlockSubStep): string => {
+  if (step.type === 'reasoning') return 'Finished thinking';
+  if (step.type === 'searching') {
+    const n = Array.isArray(step.searching) ? step.searching.length : 0;
+    return `Searched ${n} ${n === 1 ? 'query' : 'queries'}`;
+  }
+  if (step.type === 'reading') {
+    const n = step.reading.length;
+    return `Read ${n} ${n === 1 ? 'source' : 'sources'}`;
+  }
+  if (step.type === 'upload_search_results') {
+    const n = step.results.length;
+    return `Read ${n} ${n === 1 ? 'document' : 'documents'}`;
+  }
+  // The rest already read as finished ("Found 12 results", "Ranked ...").
+  return getStepTitle(step, false);
+};
+
 const AssistantSteps = ({
   block,
   status,
   isLast,
+  liveRegionRef,
 }: {
   block: ResearchBlock;
   status: 'answering' | 'completed' | 'error';
   isLast: boolean;
+  // A visually hidden role="status" element owned by MessageBox.
+  liveRegionRef?: MutableRefObject<HTMLDivElement | null>;
 }) => {
-  const [isExpanded, setIsExpanded] = useState(
-    isLast && status === 'answering' ? true : false,
-  );
   const { researchEnded, loading } = useChat();
+  const reduceMotion = useReducedMotion();
+  const panelId = useId();
 
-  useEffect(() => {
+  /* Open while this message is researching, closed once research ends.
+     Same rule as the old useEffect, applied while rendering instead (React's
+     "adjust state when a prop changes" pattern), which is what the
+     react-hooks/set-state-in-effect lint rule asks for. */
+  const [isExpanded, setIsExpanded] = useState(
+    isLast && status === 'answering' && !researchEnded,
+  );
+  const [synced, setSynced] = useState({ researchEnded, status, isLast });
+  if (
+    synced.researchEnded !== researchEnded ||
+    synced.status !== status ||
+    synced.isLast !== isLast
+  ) {
+    setSynced({ researchEnded, status, isLast });
     if (researchEnded && isLast) {
       setIsExpanded(false);
     } else if (status === 'answering' && isLast) {
       setIsExpanded(true);
     }
-  }, [researchEnded, status]);
+  }
+
+  /* Screen reader announcements. The step list itself is NOT a live region:
+     reasoning text streams in token by token and result lists grow, and a
+     live list would re-read on every patch. Instead one short line goes to
+     the status region when a step starts and when it finishes (a step is
+     finished once a later step exists, or research has ended). Ids already
+     announced are remembered, so each event is spoken once. */
+  const announced = useRef<{
+    started: Set<string>;
+    done: Set<string>;
+    ended: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    const steps = block?.data.subSteps ?? [];
+    const live = isLast && loading;
+
+    if (announced.current === null) {
+      announced.current = { started: new Set(), done: new Set(), ended: false };
+      // Opening an old chat, or a finished answer: say nothing.
+      if (!live || researchEnded) {
+        steps.forEach((s) => {
+          announced.current!.started.add(s.id);
+          announced.current!.done.add(s.id);
+        });
+        announced.current.ended = true;
+        return;
+      }
+    }
+
+    const seen = announced.current;
+    const parts: string[] = [];
+    steps.forEach((step, i) => {
+      const finished = i < steps.length - 1 || researchEnded;
+      if (finished && !seen.done.has(step.id)) {
+        seen.done.add(step.id);
+        seen.started.add(step.id);
+        parts.push(getStepDoneAnnouncement(step));
+      } else if (!finished && !seen.started.has(step.id)) {
+        seen.started.add(step.id);
+        parts.push(getStepStartAnnouncement(step));
+      }
+    });
+    if (researchEnded && isLast && !seen.ended) {
+      seen.ended = true;
+      parts.push('Research complete');
+    }
+
+    // Written straight to the DOM: React renders this node empty and never
+    // touches its text, and no re-render is needed to announce.
+    if (parts.length > 0 && liveRegionRef?.current) {
+      liveRegionRef.current.textContent = parts.join('. ') + '.';
+    }
+    // `block` gets a new identity on every patch (useChat copies it), so this
+    // runs per patch; it only writes when a step starts or finishes.
+  }, [block, researchEnded, isLast, loading, liveRegionRef]);
 
   if (!block || block.data.subSteps.length === 0) return null;
 
   return (
     <div className="rounded-lg bg-light-secondary dark:bg-dark-secondary border border-light-200 dark:border-dark-200 overflow-hidden">
       <button
+        type="button"
+        aria-expanded={isExpanded}
+        // Only point at the panel while it is in the DOM.
+        aria-controls={isExpanded ? panelId : undefined}
         onClick={() => setIsExpanded(!isExpanded)}
         className="w-full flex items-center justify-between p-3 hover:bg-light-200 dark:hover:bg-dark-200 transition duration-200"
       >
@@ -115,28 +233,33 @@ const AssistantSteps = ({
       <AnimatePresence>
         {isExpanded && (
           <motion.div
+            id={panelId}
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2 }}
+            // prefers-reduced-motion: open and close instantly.
+            transition={{ duration: reduceMotion ? 0 : 0.2 }}
             className="border-t border-light-200 dark:border-dark-200"
           >
-            <div className="p-3 space-y-2">
+            {/* Steps happen in order, so an ordered list. Tailwind's
+                preflight already removes list markers and padding. */}
+            <ol className="p-3 space-y-2">
               {block.data.subSteps.map((step, index) => {
                 const isLastStep = index === block.data.subSteps.length - 1;
                 const isStreaming = loading && isLastStep && !researchEnded;
 
                 return (
-                  <motion.div
+                  <motion.li
                     key={step.id}
-                    initial={{ opacity: 0, x: -10 }}
+                    // prefers-reduced-motion: no slide-in, step just appears.
+                    initial={reduceMotion ? false : { opacity: 0, x: -10 }}
                     animate={{ opacity: 1, x: 0 }}
-                    transition={{ duration: 0.2, delay: 0 }}
+                    transition={{ duration: reduceMotion ? 0 : 0.2, delay: 0 }}
                     className="flex gap-2"
                   >
                     <div className="flex flex-col items-center -mt-0.5">
                       <div
-                        className={`rounded-full p-1.5 bg-light-100 dark:bg-dark-100 text-black/70 dark:text-white/70 ${isStreaming ? 'animate-pulse' : ''}`}
+                        className={`rounded-full p-1.5 bg-light-100 dark:bg-dark-100 text-black/70 dark:text-white/70 ${isStreaming ? 'animate-pulse motion-reduce:animate-none' : ''}`}
                       >
                         {getStepIcon(step)}
                       </div>
@@ -160,15 +283,15 @@ const AssistantSteps = ({
                           {isStreaming && !step.reasoning && (
                             <div className="flex items-center gap-1.5 mt-0.5">
                               <div
-                                className="w-1.5 h-1.5 bg-black/40 dark:bg-white/40 rounded-full animate-bounce"
+                                className="w-1.5 h-1.5 bg-black/40 dark:bg-white/40 rounded-full animate-bounce motion-reduce:animate-none"
                                 style={{ animationDelay: '0ms' }}
                               />
                               <div
-                                className="w-1.5 h-1.5 bg-black/40 dark:bg-white/40 rounded-full animate-bounce"
+                                className="w-1.5 h-1.5 bg-black/40 dark:bg-white/40 rounded-full animate-bounce motion-reduce:animate-none"
                                 style={{ animationDelay: '150ms' }}
                               />
                               <div
-                                className="w-1.5 h-1.5 bg-black/40 dark:bg-white/40 rounded-full animate-bounce"
+                                className="w-1.5 h-1.5 bg-black/40 dark:bg-white/40 rounded-full animate-bounce motion-reduce:animate-none"
                                 style={{ animationDelay: '300ms' }}
                               />
                             </div>
@@ -211,6 +334,8 @@ const AssistantSteps = ({
                                   className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs font-medium bg-light-100 dark:bg-dark-100 text-black/70 dark:text-white/70 border border-light-200 dark:border-dark-200"
                                 >
                                   {faviconUrl && (
+                                    // Decorative favicon from a remote host; next/image would need every domain allow-listed.
+                                    // eslint-disable-next-line @next/next/no-img-element
                                     <img
                                       src={faviconUrl}
                                       alt=""
@@ -285,10 +410,10 @@ const AssistantSteps = ({
                           </div>
                         )}
                     </div>
-                  </motion.div>
+                  </motion.li>
                 );
               })}
-            </div>
+            </ol>
           </motion.div>
         )}
       </AnimatePresence>

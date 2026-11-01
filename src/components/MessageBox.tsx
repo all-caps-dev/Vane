@@ -1,7 +1,7 @@
 'use client';
 
 /* eslint-disable @next/next/no-img-element */
-import React, { MutableRefObject } from 'react';
+import React, { MutableRefObject, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import {
   BookCopy,
@@ -74,6 +74,13 @@ const MessageBox = ({
 
   const { speechStatus, start, stop } = useSpeech({ text: speechMessage });
 
+  /* Screen reader announcements for research progress. AssistantSteps writes
+     one short line here when a step starts or finishes. The region lives in
+     MessageBox, not AssistantSteps, so it is already in the page before the
+     first step arrives (a live region added together with its text is often
+     not read). */
+  const researchStatusRef = useRef<HTMLDivElement | null>(null);
+
   const markdownOverrides: MarkdownToJSX.Options = {
     renderRule(next, node, renderChildren, state) {
       if (node.type === RuleType.codeInline) {
@@ -99,6 +106,8 @@ const MessageBox = ({
       },
       citation: {
         component: Citation,
+        // The full list, so a citation can be named by its source title.
+        props: { sources },
       },
     },
   };
@@ -139,6 +148,7 @@ const MessageBox = ({
                   block={researchBlock}
                   status={section.message.status}
                   isLast={isLast}
+                  liveRegionRef={researchStatusRef}
                 />
               </div>
             ))}
@@ -150,7 +160,7 @@ const MessageBox = ({
               (b) => b.type === 'research' && b.data.subSteps.length > 0,
             ) && (
               <div className="flex items-center gap-2 p-3 rounded-lg bg-light-secondary dark:bg-dark-secondary border border-light-200 dark:border-dark-200">
-                <Disc3 className="w-4 h-4 text-black dark:text-white animate-spin" />
+                <Disc3 className="w-4 h-4 text-black dark:text-white animate-spin motion-reduce:animate-none" />
                 <span className="text-sm text-black/70 dark:text-white/70">
                   Brainstorming...
                 </span>
@@ -165,7 +175,9 @@ const MessageBox = ({
                 <Disc3
                   className={cn(
                     'text-black dark:text-white',
-                    isLast && loading ? 'animate-spin' : 'animate-none',
+                    isLast && loading
+                      ? 'animate-spin motion-reduce:animate-none'
+                      : 'animate-none',
                   )}
                   size={20}
                 />
@@ -198,6 +210,12 @@ const MessageBox = ({
                     <div className="flex flex-row items-center -mr-2">
                       <Copy initialMessage={parsedMessage} section={section} />
                       <button
+                        type="button"
+                        aria-label={
+                          speechStatus === 'started'
+                            ? 'Stop reading aloud'
+                            : 'Read answer aloud'
+                        }
                         onClick={() => {
                           if (speechStatus === 'started') {
                             stop();
@@ -283,6 +301,15 @@ const MessageBox = ({
           </div>
         )}
       </div>
+      {/* Last child on purpose: sr-only is absolutely positioned, so the
+          space-y margin it receives here does not move anything. */}
+      <div
+        ref={researchStatusRef}
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className="sr-only"
+      />
     </div>
   );
 };

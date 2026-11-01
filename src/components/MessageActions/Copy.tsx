@@ -15,6 +15,10 @@ const Copy = ({
 
   return (
     <button
+      type="button"
+      // Icon-only button. The name flips to "Copied" for the 1 s the check
+      // icon shows, so a screen reader that re-reads focus hears it worked.
+      aria-label={copied ? 'Copied' : 'Copy answer'}
       onClick={() => {
         const sources = section.message.responseBlocks.filter(
           (b) => b.type === 'source' && b.data.length > 0,
