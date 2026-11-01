@@ -3,6 +3,7 @@ import BaseLLM from '../../models/base/llm';
 import BaseEmbedding from '@/lib/models/base/embedding';
 import SessionManager from '@/lib/session';
 import { ChatTurnMessage, Chunk } from '@/lib/types';
+import type { SourceGroup } from '@/lib/evidence';
 
 export type SearchSources = 'web' | 'discussions' | 'academic';
 
@@ -66,6 +67,9 @@ export type AdditionalConfig = {
   llm: BaseLLM<any>;
   embedding: BaseEmbedding<any>;
   session: SessionManager;
+  // The classifier's standalone question; search actions rank passages
+  // against it (M2).
+  question?: string;
 };
 
 export type ResearcherInput = {
@@ -77,7 +81,11 @@ export type ResearcherInput = {
 
 export type ResearcherOutput = {
   findings: ActionOutput[];
+  // One entry per SOURCE (page), numbered from 1 in this order: what the UI
+  // source cards, the API's `sources` and the [N] citations refer to.
   searchFindings: Chunk[];
+  // The same sources with their passages, for the writer context (M2).
+  sources: SourceGroup[];
 };
 
 export type SearchActionOutput = {

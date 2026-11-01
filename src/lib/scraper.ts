@@ -166,9 +166,29 @@ const formatContent = (title: string, url: string, text: string) => `
         ${text || 'No content available'}
         `;
 
-const failedResult = (url: string) => ({
+/* What Scraper.scrape returns. `content` and `title` are what callers have
+   always used. M2 adds:
+   - html: the raw HTML that produced the text (the HTTP body or the browser's
+     rendered page), so the evidence pipeline can chunk it by section.
+     Undefined for text/plain pages and failed fetches.
+   - text: the readable plain text (no "# title - url" header line).
+   - fetchedAt: when the fetch finished, as a UTC ISO string.
+   - failed: true when nothing could be read (blocked, error, timeout). */
+export type ScrapeResult = {
+  content: string;
+  title: string;
+  html?: string;
+  text: string;
+  fetchedAt: string;
+  failed?: boolean;
+};
+
+const failedResult = (url: string): ScrapeResult => ({
   title: 'Failed to scrape',
   content: `# ${url}\n\nError scraping content.`,
+  text: '',
+  fetchedAt: new Date().toISOString(),
+  failed: true,
 });
 
 class Scraper {
@@ -264,7 +284,7 @@ class Scraper {
   private static async browserFetch(
     url: string,
     onBlocked: (reason: string) => void,
-  ): Promise<{ title: string; text: string }> {
+  ): Promise<{ title: string; text: string; html: string }> {
     await this.initBrowser();
 
     if (!this.browser) throw new Error('Browser not initialized');
@@ -303,7 +323,7 @@ class Scraper {
       const { text } = extractReadable(html, url);
       const title = await page.title();
 
-      return { title, text };
+      return { title, text, html };
     } finally {
       this.userCount--;
 
@@ -315,10 +335,7 @@ class Scraper {
     }
   }
 
-  static async scrape(
-    url: string,
-    trace?: Tracer,
-  ): Promise<{ content: string; title: string }> {
+  static async scrape(url: string, trace?: Tracer): Promise<ScrapeResult> {
     const startedAt = Date.now();
 
     /* One 'fetch' trace event per scrape. outcome is 'ok', 'empty' (no
@@ -336,7 +353,7 @@ class Scraper {
     let httpStatus: number | undefined;
     let fallbackReason: string | undefined;
     // Kept so a thin HTTP result can still be used if the browser fails.
-    let thin: { title: string; text: string } | undefined;
+    let thin: { title: string; text: string; html?: string } | undefined;
 
     // 1. Plain HTTP.
     try {
@@ -344,9 +361,11 @@ class Scraper {
       httpStatus = res.status;
 
       if (res.ok) {
-        const page = res.contentType.toLowerCase().startsWith('text/plain')
-          ? { title: url, text: res.body.trim() }
-          : extractReadable(res.body, res.finalUrl);
+        // html stays undefined for text/plain, so callers chunk it as text.
+        const page: { title: string; text: string; html?: string } =
+          res.contentType.toLowerCase().startsWith('text/plain')
+            ? { title: url, text: res.body.trim() }
+            : { ...extractReadable(res.body, res.finalUrl), html: res.body };
 
         if (page.text.length >= MIN_TEXT_CHARS) {
           traceFetch({
@@ -359,6 +378,9 @@ class Scraper {
           return {
             content: formatContent(page.title, url, page.text),
             title: page.title,
+            html: page.html,
+            text: page.text,
+            fetchedAt: new Date().toISOString(),
           };
         }
 
@@ -421,6 +443,9 @@ class Scraper {
       return {
         content: formatContent(best.title, url, best.text),
         title: best.title,
+        html: best.html,
+        text: best.text,
+        fetchedAt: new Date().toISOString(),
       };
     } catch (err) {
       console.log(`Error scraping ${url}:`, err);
@@ -441,6 +466,9 @@ class Scraper {
         return {
           content: formatContent(thin.title, url, thin.text),
           title: thin.title,
+          html: thin.html,
+          text: thin.text,
+          fetchedAt: new Date().toISOString(),
         };
       }
 

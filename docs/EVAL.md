@@ -25,8 +25,8 @@ The date is UTC. The folder is created on demand. API keys, base URLs and Author
 
 Top-level fields: `requestId`, `startedAt` (UTC), `traceMode` (`on` or `full`), `totalMs`, `agent` (`chat` for the web UI, `api` for `/api/search`), `mode` (speed, balanced, quality), `sourceCount`, `citations`, `errors`, `spans` and `events`. Span and event times are milliseconds since the request started.
 
-Spans: `classify`, `widgets`, `research`, `embed` (speed and balanced), `pick` (quality), `write`.
-Events: `request`, `research.iteration`, `research.actions`, `search.query`, `fetch`, `extract`, `dedup`, `sources`, `citations`, `citations.removed`.
+Spans: `classify`, `widgets`, `research`, `rerank` (M2), `pick` (quality with reranker `off` only), `write`. The M1 `embed` span is gone: embedding similarity now runs inside the `rerank` span when the embedding reranker is used.
+Events: `request`, `research.iteration`, `research.actions`, `search.query`, `fetch`, `chunk`, `rerank.fallback`, `select`, `evidence`, `extract` (reranker `off` only), `dedup`, `sources`, `citations`, `citations.removed`.
 
 Fields added in M1:
 
@@ -119,6 +119,37 @@ M1 is about robustness and speed. Prompts are unchanged.
 - **Citation cleanup.** After the answer finishes, `[n]` markers that point past the last source are removed (code and links are untouched). The chat UI gets one final update and the stored message holds the clean text; `/api/search` without `stream` returns the clean text. Streaming `/api/search` clients receive the raw chunks and are **not** corrected.
 - **Fetching.** Pages are fetched with plain HTTP first and the headless browser only when that fails or returns under 400 characters of text. A private-address guard refuses localhost, private, link-local and tailnet addresses on every hop. See docs/architecture/WORKING.md.
 - **SearXNG options.** `time_range`, `language` and `safesearch` can be passed (no caller does yet), and unset options are no longer sent as the text `undefined`.
+
+## What M2 changed
+
+M2 is about evidence quality: what the writer is given to cite. Between "SearXNG returned results" and "the writer gets context" Vane now fetches pages, splits them into section-aware passages, ranks the passages with a reranker, and hands the writer a budget of diverse passages with stable ids.
+
+- **Evidence contract** (`src/lib/evidence.ts`). Every passage has a `sourceId` (`s` plus 8 hex characters of the sha1 of the normalised URL, the same in every request) and a `chunkId` (`<sourceId>:c<n>`). `sourceKind` says what the text is: `search_snippet` (the search engine's excerpt), `full_page` (text read from the page) or `upload`. A snippet is never presented as page text.
+- **Chunking** (`src/lib/utils/chunkDocument.ts`). Pages are split along their headings into passages of at most 350 tokens. Each passage starts with its heading path (`History > 1900-1945`). Code blocks and tables stay whole; lists keep their bullets; a paragraph longer than the budget is split on sentence ends.
+- **Reranking** (`src/lib/rerank/`). By default an ONNX cross-encoder (`Xenova/ms-marco-MiniLM-L-6-v2`, q8 weights, about 23 MB, downloaded from Hugging Face on first use) runs in process on the CPU, one model call at a time, 16 pairs per batch. If it cannot load, or a rerank fails or times out, Vane uses the embedding model's cosine similarity instead and records a `rerank.fallback` event.
+- **Selection.** Up to the evidence budget (16 passages, quality 24), at most 4 passages from one page, at least 3 distinct pages when there are 3, near-duplicate passages (over 80% shared words) dropped.
+- **Modes.** Speed reranks the snippets and does not fetch pages. Balanced (with "Read pages in balanced mode" on) reranks the snippets, reads the top 6 pages (4 at a time, first 12 passages of each), and reranks the page passages plus the snippets of pages that could not be read. Quality reads the top 10 pages with a 1.5x budget; the LLM picker and the per-chunk LLM extractor are no longer used unless the reranker is set to `off`, in which case quality behaves exactly as before M2. Speed no longer drops results below 0.5 cosine similarity; the selection budget replaces that threshold.
+- **Writer context.** The writer sees one `<source index=N url="..." title="..." kind="full_page|search_snippet|upload">` per page with `<passage id="..." heading="...">` elements inside, so `[N]` still means source N. Source cards in the UI, the `source` block and the API's `sources` list one entry per page, not per passage. The writer prompt now says to cite a source only when its passage supports the sentence (general knowledge carries no citation) and to prefer `full_page` sources for specific claims.
+
+New trace fields:
+
+- `rerank` span: `stage` (`snippets` or `passages`), `reranker` (configured), `usedReranker` (what actually produced the order after any fallback), `candidates`, `topK`, `durationMs`.
+- `rerank.fallback` event: `reason`, `from`, `to`.
+- `chunk` event, one per page read: `url`, `chunks`, `kept` (passages sent to the reranker), `extraction` (`ok`, or `thin` under 400 characters).
+- `select` event: `budget`, `candidates`, `selected`, `distinctSources`, `droppedDuplicates`.
+- `evidence` event: `items`, one per selected passage with `id` (the chunkId), `sourceKind`, `extraction` and `score`. Scores come from one reranker and one call; never compare them across rerankers.
+- `dedup` event at the end of research now has `stage: 'source'`, `before` (passages from all actions), `passages` (after chunkId dedup) and `after` (sources).
+
+### Config keys (Settings, Search; server scope)
+
+| Setting                     | Key                  | Default                                  | Environment variable                                           |
+| --------------------------- | -------------------- | ---------------------------------------- | -------------------------------------------------------------- |
+| Reranker                    | `reranker`           | `transformers` (also `embedding`, `off`) | `VANE_RERANKER`                                                |
+| Reranker model              | `rerankerModel`      | `Xenova/ms-marco-MiniLM-L-6-v2`          | `VANE_RERANKER_MODEL`                                          |
+| Read pages in balanced mode | `balancedReadsPages` | on                                       | `VANE_BALANCED_READS_PAGES` (`1`/`true` on, anything else off) |
+| Evidence budget (passages)  | `evidenceBudget`     | `16` (1 to 64; quality uses 1.5x)        | `VANE_EVIDENCE_BUDGET`                                         |
+
+As with the SearXNG URL, a select or text setting takes its environment variable only while no value is saved; after that the saved value (Settings UI) wins. The switch follows the trace switch: when its variable is set it decides the value at every startup.
 
 ## Run the tests
 

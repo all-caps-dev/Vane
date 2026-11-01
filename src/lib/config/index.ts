@@ -124,6 +124,57 @@ class ConfigManager {
         scope: 'server',
         env: 'VANE_TRACE',
       },
+      {
+        name: 'Reranker',
+        key: 'reranker',
+        type: 'select',
+        options: [
+          { name: 'Cross-encoder (in process)', value: 'transformers' },
+          { name: 'Embedding similarity', value: 'embedding' },
+          { name: 'Off (search engine order)', value: 'off' },
+        ],
+        required: false,
+        description:
+          'How passages are ranked before the answer is written. The cross-encoder runs on the CPU and falls back to embedding similarity if it cannot load. Off keeps the search engine order and, in quality mode, the older LLM picker and extractor.',
+        default: 'transformers',
+        scope: 'server',
+        env: 'VANE_RERANKER',
+      },
+      {
+        name: 'Reranker model',
+        key: 'rerankerModel',
+        type: 'string',
+        required: false,
+        description:
+          'Hugging Face model id of an ONNX cross-encoder for the in-process reranker.',
+        placeholder: 'Xenova/ms-marco-MiniLM-L-6-v2',
+        default: 'Xenova/ms-marco-MiniLM-L-6-v2',
+        scope: 'server',
+        env: 'VANE_RERANKER_MODEL',
+      },
+      {
+        name: 'Read pages in balanced mode',
+        key: 'balancedReadsPages',
+        type: 'switch',
+        required: false,
+        description:
+          'In balanced mode, fetch the top pages and cite passages from them instead of search snippets only.',
+        default: true,
+        scope: 'server',
+        env: 'VANE_BALANCED_READS_PAGES',
+      },
+      {
+        name: 'Evidence budget (passages)',
+        key: 'evidenceBudget',
+        type: 'string',
+        required: false,
+        description:
+          'How many passages each search hands to the writer. Quality mode uses 1.5 times this.',
+        placeholder: '16',
+        default: '16',
+        scope: 'server',
+        env: 'VANE_EVIDENCE_BUDGET',
+      },
     ],
   };
 

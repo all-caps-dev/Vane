@@ -1,21 +1,56 @@
+// TypeScript: runs a search action's queries and turns the results into ranked, selected evidence passages (M2).
 import BaseEmbedding from '@/lib/models/base/embedding';
 import BaseLLM from '@/lib/models/base/llm';
-import { searchSearxng, SearxngSearchOptions } from '@/lib/searxng';
+import {
+  searchSearxng,
+  SearxngSearchOptions,
+  SearxngSearchResult,
+} from '@/lib/searxng';
 import SessionManager from '@/lib/session';
 import { Chunk, ResearchBlock, SearchResultsResearchBlock } from '@/lib/types';
 import { SearchAgentConfig } from '../../../types';
-import computeSimilarity from '@/lib/utils/computeSimilarity';
 import z from 'zod';
-import Scraper from '@/lib/scraper';
+import Scraper, { MIN_TEXT_CHARS } from '@/lib/scraper';
 import { splitText } from '@/lib/utils/splitText';
 import { normalizeUrl } from '@/lib/utils/normalizeUrl';
+import { chunkDocument, chunkText } from '@/lib/utils/chunkDocument';
+import {
+  Evidence,
+  evidenceToChunk,
+  pageToEvidence,
+  selectEvidence,
+  snippetToEvidence,
+} from '@/lib/evidence';
+import { getReranker, Reranker, rerankSafely } from '@/lib/rerank';
+import {
+  getBalancedReadsPages,
+  getEvidenceBudget,
+  getRerankerKind,
+} from '@/lib/config/serverRegistry';
+
+type Trace = InstanceType<typeof SessionManager>['trace'];
+
+/* Mode settings for the evidence pipeline. */
+// How many top sources balanced and quality mode fetch and read.
+const PAGES_TO_READ = { balanced: 6, quality: 10 } as const;
+// How many pages are fetched at the same time.
+const FETCH_CONCURRENCY = 4;
+// Only the first chunks of a long page go to the reranker, so a 2-core box
+// scores at most ~120 passages per search (about 8 s on the deploy box).
+const MAX_CHUNKS_PER_PAGE = 12;
+// Passages per source and the number of distinct sources to aim for.
+const MAX_PER_SOURCE = 4;
+const MIN_SOURCES = 3;
+// Rerank time limits; on timeout the embedding reranker is used instead.
+const SNIPPET_RERANK_TIMEOUT_MS = 10000;
+const PASSAGE_RERANK_TIMEOUT_MS = 30000;
 
 /* Runs one SearXNG query. A failing query is recorded on the trace and
    returns null, so the other queries of the same search still count. */
 const searchOrNull = async (
   q: string,
   opts: SearxngSearchOptions,
-  trace: InstanceType<typeof SessionManager>['trace'],
+  trace: Trace,
 ) => {
   try {
     return await searchSearxng(q, opts, trace);
@@ -26,26 +61,32 @@ const searchOrNull = async (
   }
 };
 
-export const executeSearch = async (input: {
-  queries: string[];
-  mode: SearchAgentConfig['mode'];
-  searchConfig?: SearxngSearchOptions;
-  researchBlock: ResearchBlock;
-  session: InstanceType<typeof SessionManager>;
-  llm: BaseLLM<any>;
-  embedding: BaseEmbedding<any>;
-}) => {
-  const researchBlock = input.researchBlock;
-  /* Per-request tracer; a no-op unless tracing is on. */
-  const trace = input.session.trace;
+// Runs fn over items with at most `limit` running at once; keeps order.
+const mapWithConcurrency = async <T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> => {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, worker),
+  );
+  return out;
+};
 
-  researchBlock.data.subSteps.push({
-    id: crypto.randomUUID(),
-    type: 'searching',
-    searching: input.queries,
-  });
-
-  input.session.updateBlock(researchBlock.id, [
+// Pushes the research block's sub-steps to the UI.
+const pushSubSteps = (
+  session: InstanceType<typeof SessionManager>,
+  researchBlock: ResearchBlock,
+) =>
+  session.updateBlock(researchBlock.id, [
     {
       op: 'replace',
       path: '/data/subSteps',
@@ -53,259 +94,383 @@ export const executeSearch = async (input: {
     },
   ]);
 
-  if (input.mode === 'speed' || input.mode === 'balanced') {
-    const searchResultsBlockId = crypto.randomUUID();
-    let searchResultsEmitted = false;
+type SearchInput = {
+  queries: string[];
+  mode: SearchAgentConfig['mode'];
+  searchConfig?: SearxngSearchOptions;
+  researchBlock: ResearchBlock;
+  session: InstanceType<typeof SessionManager>;
+  llm: BaseLLM<any>;
+  embedding: BaseEmbedding<any>;
+  // The standalone question; passages are ranked against it. When missing,
+  // the queries joined by spaces are used.
+  question?: string;
+};
 
-    const results: Chunk[] = [];
+/*
+  Flow (M2):
+  1. Every query goes to SearXNG; each result becomes one search_snippet
+     passage, deduplicated by normalised URL (queries and best rank kept).
+  2. Speed (and balanced with page reading off): rerank the snippets
+     against the question, select within the budget, return.
+  3. Balanced and quality: rerank the snippets, fetch the top 6 (10) new
+     sources, chunk each page by section, rerank page passages plus the
+     snippets of pages that could not be read, select, return.
+  4. Quality with reranker 'off': the pre-M2 LLM picker and extractor.
+*/
+export const executeSearch = async (input: SearchInput): Promise<Chunk[]> => {
+  const researchBlock = input.researchBlock;
+  /* Per-request tracer; a no-op unless tracing is on. */
+  const trace = input.session.trace;
+  const question = input.question?.trim() || input.queries.join(' ');
 
-    const search = async (q: string) => {
-      const res = await searchOrNull(
-        q,
-        {
-          ...(input.searchConfig ? input.searchConfig : {}),
-        },
-        trace,
-      );
+  researchBlock.data.subSteps.push({
+    id: crypto.randomUUID(),
+    type: 'searching',
+    searching: input.queries,
+  });
+  pushSubSteps(input.session, researchBlock);
 
-      if (!res) return;
+  /* ---- 1. Search ---- */
 
-      let resultChunks: Chunk[] = [];
+  const searchResultsBlockId = crypto.randomUUID();
+  let searchResultsEmitted = false;
 
-      /* 'embed' span: the query and every result in ONE embedText call. */
-      const embedSpan = trace.span('embed', { query: q });
-      const embedStartedAt = Date.now();
+  // One snippet passage per source, keyed by normalised URL.
+  const snippets = new Map<string, Evidence>();
+  // The results in the pre-M2 shape, for the legacy quality path only.
+  const legacyResults: Chunk[] = [];
+  let failedQueries = 0;
 
-      try {
-        const contents = res.results.map((r) => r.content || r.title);
-        // Index 0 is the query; index i + 1 is result i.
-        const embeddings = await input.embedding.embedText([q, ...contents]);
-        if (embeddings.length !== contents.length + 1) {
-          throw new Error(
-            `embedText returned ${embeddings.length} vectors for ${contents.length + 1} texts`,
-          );
-        }
-        const queryEmbedding = embeddings[0];
+  // Shows this query's results in the UI's search_results step.
+  const emitSearchResults = (chunks: Chunk[]) => {
+    if (!searchResultsEmitted) {
+      searchResultsEmitted = true;
+      researchBlock.data.subSteps.push({
+        id: searchResultsBlockId,
+        type: 'search_results',
+        reading: chunks,
+      });
+    } else {
+      const subStep = researchBlock.data.subSteps.find(
+        (step) => step.id === searchResultsBlockId,
+      ) as SearchResultsResearchBlock | undefined;
+      subStep?.reading.push(...chunks);
+    }
+    pushSubSteps(input.session, researchBlock);
+  };
 
-        resultChunks = res.results
-          .map((r, i) => {
-            const chunkEmbedding = embeddings[i + 1];
+  const search = async (q: string) => {
+    const res = await searchOrNull(
+      q,
+      {
+        ...(input.searchConfig ? input.searchConfig : {}),
+      },
+      trace,
+    );
 
-            return {
-              content: contents[i],
-              metadata: {
-                title: r.title,
-                url: r.url,
-                similarity: computeSimilarity(queryEmbedding, chunkEmbedding),
-                embedding: chunkEmbedding,
-              },
-            };
-          })
-          .filter((c) => c.metadata.similarity > 0.5);
-
-        embedSpan.end({
-          count: res.results.length + 1,
-          durationMs: Date.now() - embedStartedAt,
-          keptAboveThreshold: resultChunks.length,
-        });
-      } catch (err) {
-        embedSpan.end({
-          count: res.results.length + 1,
-          durationMs: Date.now() - embedStartedAt,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        trace.error('embed', err);
-
-        resultChunks = res.results.map((r) => {
-          const content = r.content || r.title;
-
-          return {
-            content,
-            metadata: {
-              title: r.title,
-              url: r.url,
-              similarity: 1,
-              embedding: [],
-            },
-          };
-        });
-      } finally {
-        results.push(...resultChunks);
-      }
-
-      if (!searchResultsEmitted) {
-        searchResultsEmitted = true;
-
-        researchBlock.data.subSteps.push({
-          id: searchResultsBlockId,
-          type: 'search_results',
-          reading: resultChunks,
-        });
-
-        input.session.updateBlock(researchBlock.id, [
-          {
-            op: 'replace',
-            path: '/data/subSteps',
-            value: researchBlock.data.subSteps,
-          },
-        ]);
-      } else if (searchResultsEmitted) {
-        const subStepIndex = researchBlock.data.subSteps.findIndex(
-          (step) => step.id === searchResultsBlockId,
-        );
-
-        const subStep = researchBlock.data.subSteps[
-          subStepIndex
-        ] as SearchResultsResearchBlock;
-
-        subStep.reading.push(...resultChunks);
-
-        input.session.updateBlock(researchBlock.id, [
-          {
-            op: 'replace',
-            path: '/data/subSteps',
-            value: researchBlock.data.subSteps,
-          },
-        ]);
-      }
-    };
-
-    await Promise.all(input.queries.map(search));
-
-    results.sort((a, b) => b.metadata.similarity - a.metadata.similarity);
-
-    const uniqueSearchResultIndices: Set<number> = new Set();
-
-    for (let i = 0; i < results.length; i++) {
-      let isDuplicate = false;
-
-      for (const indice of uniqueSearchResultIndices.keys()) {
-        if (
-          results[i].metadata.embedding.length === 0 ||
-          results[indice].metadata.embedding.length === 0
-        )
-          continue;
-
-        const similarity = computeSimilarity(
-          results[i].metadata.embedding,
-          results[indice].metadata.embedding,
-        );
-
-        if (similarity > 0.75) {
-          isDuplicate = true;
-          break;
-        }
-      }
-
-      if (!isDuplicate) {
-        uniqueSearchResultIndices.add(i);
-      }
+    if (!res) {
+      failedQueries++;
+      return;
     }
 
-    const uniqueSearchResults = Array.from(uniqueSearchResultIndices.keys())
-      .map((i) => {
-        const uniqueResult = results[i];
+    const results: SearxngSearchResult[] = Array.isArray(res.results)
+      ? res.results.filter((r) => r && typeof r.url === 'string')
+      : [];
+    const shown: Chunk[] = [];
 
-        delete uniqueResult.metadata.embedding;
-        delete uniqueResult.metadata.similarity;
-
-        return uniqueResult;
-      })
-      .slice(0, 20);
-
-    trace.event('dedup', {
-      stage: 'similarity',
-      before: results.length,
-      after: uniqueSearchResultIndices.size,
-      returned: uniqueSearchResults.length,
-    });
-
-    return uniqueSearchResults;
-  } else if (input.mode === 'quality') {
-    const searchResultsBlockId = crypto.randomUUID();
-    let searchResultsEmitted = false;
-
-    const searchResults: Chunk[] = [];
-
-    let failedQueries = 0;
-
-    const search = async (q: string) => {
-      const res = await searchOrNull(
-        q,
-        {
-          ...(input.searchConfig ? input.searchConfig : {}),
+    results.forEach((r, i) => {
+      legacyResults.push({
+        content: r.content || r.title,
+        metadata: {
+          title: r.title,
+          url: r.url,
+          similarity: 1,
+          embedding: [],
         },
-        trace,
-      );
-
-      if (!res) {
-        failedQueries++;
-        return;
-      }
-
-      let resultChunks: Chunk[] = [];
-
-      resultChunks = res.results.map((r) => {
-        const content = r.content || r.title;
-
-        return {
-          content,
-          metadata: {
-            title: r.title,
-            url: r.url,
-            similarity: 1,
-            embedding: [],
-          },
-        };
       });
 
-      searchResults.push(...resultChunks);
+      const snippet = snippetToEvidence(r, q, i + 1);
+      const existing = snippets.get(snippet.canonicalUrl);
 
-      if (!searchResultsEmitted) {
-        searchResultsEmitted = true;
-
-        researchBlock.data.subSteps.push({
-          id: searchResultsBlockId,
-          type: 'search_results',
-          reading: resultChunks,
-        });
-
-        input.session.updateBlock(researchBlock.id, [
-          {
-            op: 'replace',
-            path: '/data/subSteps',
-            value: researchBlock.data.subSteps,
-          },
-        ]);
-      } else if (searchResultsEmitted) {
-        const subStepIndex = researchBlock.data.subSteps.findIndex(
-          (step) => step.id === searchResultsBlockId,
-        );
-
-        const subStep = researchBlock.data.subSteps[
-          subStepIndex
-        ] as SearchResultsResearchBlock;
-
-        subStep.reading.push(...resultChunks);
-
-        input.session.updateBlock(researchBlock.id, [
-          {
-            op: 'replace',
-            path: '/data/subSteps',
-            value: researchBlock.data.subSteps,
-          },
-        ]);
+      if (existing) {
+        // Same page from another query: remember the query and best rank.
+        if (!existing.queries.includes(q)) existing.queries.push(q);
+        if (snippet.rank !== undefined)
+          existing.rank = Math.min(existing.rank ?? Infinity, snippet.rank);
+        if (snippet.engines)
+          existing.engines = [
+            ...new Set([...(existing.engines ?? []), ...snippet.engines]),
+          ];
+        if (!existing.text || existing.text === existing.title)
+          existing.text = snippet.text;
+      } else {
+        snippets.set(snippet.canonicalUrl, snippet);
       }
-    };
 
-    await Promise.all(input.queries.map(search));
+      shown.push(evidenceToChunk(snippet));
+    });
 
-    // Every query failed: nothing to pick from, so skip the picker LLM call.
-    if (input.queries.length > 0 && failedQueries === input.queries.length) {
-      return [];
+    emitSearchResults(shown);
+  };
+
+  await Promise.all(input.queries.map(search));
+
+  // Every query failed: nothing to rank or read.
+  if (input.queries.length > 0 && failedQueries === input.queries.length) {
+    return [];
+  }
+
+  /* ---- 4. Legacy quality path ---- */
+
+  if (input.mode === 'quality' && getRerankerKind() === 'off') {
+    return legacyQualitySearch(input, legacyResults);
+  }
+
+  // Best search rank first, so 'off' and ties keep the engine's order.
+  const candidates = [...snippets.values()].sort(
+    (a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity),
+  );
+  if (candidates.length === 0) return [];
+
+  const reranker = await getReranker(input.embedding, trace);
+  const baseBudget = getEvidenceBudget();
+  const budget =
+    input.mode === 'quality' ? Math.round(baseBudget * 1.5) : baseBudget;
+
+  const rerank = (stage: string, items: Evidence[], timeoutMs: number) =>
+    rerankEvidence({
+      stage,
+      items,
+      reranker,
+      question,
+      timeoutMs,
+      embedding: input.embedding,
+      trace,
+    });
+
+  /* ---- 2. Speed: snippets only ---- */
+
+  const rankedSnippets = await rerank(
+    'snippets',
+    candidates,
+    SNIPPET_RERANK_TIMEOUT_MS,
+  );
+
+  const readsPages =
+    input.mode === 'quality' ||
+    (input.mode === 'balanced' && getBalancedReadsPages());
+
+  if (!readsPages) {
+    return finishSelection(rankedSnippets, budget, trace);
+  }
+
+  /* ---- 3. Balanced and quality: read the top pages ---- */
+
+  // Pages read by an earlier search of this request are not read again;
+  // their passages are already in that search's output.
+  const alreadyRead = new Set<string>();
+  researchBlock.data.subSteps.forEach((step) => {
+    if (step.type === 'reading') {
+      step.reading.forEach((chunk) => {
+        alreadyRead.add(normalizeUrl(chunk.metadata.url));
+      });
+    }
+  });
+
+  const toRead = rankedSnippets
+    .filter((s) => !alreadyRead.has(s.canonicalUrl))
+    .slice(0, PAGES_TO_READ[input.mode === 'quality' ? 'quality' : 'balanced']);
+
+  const readingBlockId = crypto.randomUUID();
+  let readingEmitted = false;
+
+  // Shows a page that was read in the UI's reading step.
+  const emitReading = (url: string, title: string) => {
+    const chunk: Chunk = { content: '', metadata: { url, title } };
+    if (!readingEmitted) {
+      readingEmitted = true;
+      researchBlock.data.subSteps.push({
+        id: readingBlockId,
+        type: 'reading',
+        reading: [chunk],
+      });
+    } else {
+      const subStep = researchBlock.data.subSteps.find(
+        (step) => step.id === readingBlockId,
+      );
+      if (subStep && subStep.type === 'reading') subStep.reading.push(chunk);
+    }
+    pushSubSteps(input.session, researchBlock);
+  };
+
+  // Fetches one source. Returns its page passages, or its snippet (marked
+  // extraction 'failed') when the page could not be read.
+  const readSource = async (snippet: Evidence): Promise<Evidence[]> => {
+    let scraped: Awaited<ReturnType<typeof Scraper.scrape>> | undefined;
+    try {
+      scraped = await Scraper.scrape(snippet.url, trace);
+    } catch (err) {
+      console.log('Error scraping data from', snippet.url, err);
+      trace.error(`fetch ${snippet.url}`, err);
     }
 
-    const pickerPrompt = `
+    let chunks: ReturnType<typeof chunkText> = [];
+    if (scraped && !scraped.failed) {
+      try {
+        chunks = scraped.html
+          ? chunkDocument(scraped.html, { url: snippet.url })
+          : chunkText(scraped.text);
+        // Readability found text but the walk found no blocks: use the text.
+        if (chunks.length === 0 && scraped.text)
+          chunks = chunkText(scraped.text);
+      } catch (err) {
+        trace.error(`chunk ${snippet.url}`, err);
+      }
+    }
+
+    if (!scraped || scraped.failed || chunks.length === 0) {
+      return [{ ...snippet, extraction: 'failed' }];
+    }
+
+    const extraction = scraped.text.length < MIN_TEXT_CHARS ? 'thin' : 'ok';
+    emitReading(snippet.url, scraped.title || snippet.title);
+
+    trace.event('chunk', {
+      url: snippet.url,
+      chunks: chunks.length,
+      kept: Math.min(chunks.length, MAX_CHUNKS_PER_PAGE),
+      extraction,
+    });
+
+    return pageToEvidence(scraped, chunks.slice(0, MAX_CHUNKS_PER_PAGE), {
+      url: snippet.url,
+      extraction,
+      queries: snippet.queries,
+      fallbackTitle: snippet.title,
+      engines: snippet.engines,
+      rank: snippet.rank,
+      publishedAt: snippet.publishedAt,
+    });
+  };
+
+  const perSource = await mapWithConcurrency(
+    toRead,
+    FETCH_CONCURRENCY,
+    readSource,
+  );
+  const pool = perSource.flat();
+
+  if (pool.length === 0) return [];
+
+  const rankedPassages = await rerank(
+    'passages',
+    pool,
+    PASSAGE_RERANK_TIMEOUT_MS,
+  );
+
+  return finishSelection(rankedPassages, budget, trace);
+};
+
+/*
+  Reranks evidence against the question and returns it best first with
+  `score` set. Never throws: rerankSafely falls back to embeddings, then to
+  the given order. Records the 'rerank' span.
+*/
+const rerankEvidence = async (args: {
+  stage: string;
+  items: Evidence[];
+  reranker: Reranker;
+  question: string;
+  timeoutMs: number;
+  embedding: BaseEmbedding<any>;
+  trace: Trace;
+}): Promise<Evidence[]> => {
+  const { items, trace } = args;
+  const span = trace.span('rerank', {
+    stage: args.stage,
+    reranker: args.reranker.name,
+    candidates: items.length,
+    topK: items.length,
+  });
+  const startedAt = Date.now();
+
+  // The title gives the model context the passage itself may lack.
+  const passages = items.map((e, i) => ({
+    id: String(i),
+    text: e.title ? `${e.title}\n${e.text}` : e.text,
+  }));
+
+  const { results, usedReranker } = await rerankSafely(
+    args.reranker,
+    args.embedding,
+    args.question,
+    passages,
+    { timeoutMs: args.timeoutMs },
+    trace,
+  );
+
+  span.end({ durationMs: Date.now() - startedAt, usedReranker });
+
+  const ranked: Evidence[] = [];
+  const seen = new Set<number>();
+  for (const r of results) {
+    const i = Number(r.id);
+    if (!items[i] || seen.has(i)) continue;
+    seen.add(i);
+    ranked.push({ ...items[i], score: r.score });
+  }
+  // Defensive: anything the reranker did not return goes last, in order.
+  items.forEach((e, i) => {
+    if (!seen.has(i)) ranked.push(e);
+  });
+  return ranked;
+};
+
+// Applies the evidence budget, records 'select' and 'evidence' trace
+// events, and converts the result to the Chunk shape callers expect.
+const finishSelection = (
+  ranked: Evidence[],
+  budget: number,
+  trace: Trace,
+): Chunk[] => {
+  const { selected, distinctSources, droppedDuplicates } = selectEvidence(
+    ranked,
+    { budget, maxPerSource: MAX_PER_SOURCE, minSources: MIN_SOURCES },
+  );
+
+  trace.event('select', {
+    budget,
+    candidates: ranked.length,
+    selected: selected.length,
+    distinctSources,
+    droppedDuplicates,
+  });
+  trace.event('evidence', {
+    items: selected.map((e) => ({
+      id: e.chunkId,
+      sourceKind: e.sourceKind,
+      extraction: e.extraction,
+      score: e.score,
+    })),
+  });
+
+  return selected.map(evidenceToChunk);
+};
+
+/*
+  The pre-M2 quality path, kept unchanged for reranker 'off': an LLM picks
+  up to 3 results, their pages are scraped, and an LLM extracts facts from
+  each 4000-token piece.
+*/
+const legacyQualitySearch = async (
+  input: SearchInput,
+  searchResults: Chunk[],
+): Promise<Chunk[]> => {
+  const researchBlock = input.researchBlock;
+  const trace = input.session.trace;
+
+  const pickerPrompt = `
       Assistant is an AI search result picker. Assistant's task is to pick 2-3 of the most relevant search results based off the query which can be then scraped for information to answer the query.
       Assistant will be shared with the search results retrieved from a search engine along with the queries used to retrieve those results. Assistant will then pick maxiumum 3 of the most relevant search results based on the queries and the content of the search results. Assistant should only pick search results that are relevant to the query and can help in answering the question.
       
@@ -329,76 +494,74 @@ export const executeSearch = async (input: {
       </example_output>
       `;
 
-    const pickerSchema = z.object({
-      picked_indices: z
-        .array(z.number())
-        .describe(
-          'The array of the picked indices to be scraped for answering',
-        ),
-    });
+  const pickerSchema = z.object({
+    picked_indices: z
+      .array(z.number())
+      .describe('The array of the picked indices to be scraped for answering'),
+  });
 
-    const pickSpan = trace.span('pick', { candidates: searchResults.length });
+  const pickSpan = trace.span('pick', { candidates: searchResults.length });
 
-    const pickerResponse = await input.llm.generateObject<typeof pickerSchema>({
-      schema: pickerSchema,
-      messages: [
-        {
-          role: 'system',
-          content: pickerPrompt,
-        },
-        {
-          role: 'user',
-          content: `<queries>${input.queries.join(', ')}</queries>\n<search_results>${searchResults.map((result, index) => `<result indice=${index}>${JSON.stringify(result)}</result>`).join('\n')}</search_results>`,
-        },
-      ],
-    });
+  const pickerResponse = await input.llm.generateObject<typeof pickerSchema>({
+    schema: pickerSchema,
+    messages: [
+      {
+        role: 'system',
+        content: pickerPrompt,
+      },
+      {
+        role: 'user',
+        content: `<queries>${input.queries.join(', ')}</queries>\n<search_results>${searchResults.map((result, index) => `<result indice=${index}>${JSON.stringify(result)}</result>`).join('\n')}</search_results>`,
+      },
+    ],
+  });
 
-    const pickedIndices = pickerResponse.picked_indices.slice(0, 3);
-    const pickedResults = pickedIndices
-      .map((i) => searchResults[i])
-      .filter((r) => r !== undefined);
+  const pickedIndices = pickerResponse.picked_indices.slice(0, 3);
+  const pickedResults = pickedIndices
+    .map((i) => searchResults[i])
+    .filter((r) => r !== undefined);
 
-    /* Normalised keys (normalizeUrl.ts) so ?utm_ variants, http/https and
+  /* Normalised keys (normalizeUrl.ts) so ?utm_ variants, http/https and
        trailing slashes of an already-read page are not read again. */
-    const alreadyExtractedURLs = new Set<string>();
+  const alreadyExtractedURLs = new Set<string>();
 
-    researchBlock.data.subSteps.forEach((step) => {
-      if (step.type === 'reading') {
-        step.reading.forEach((chunk) => {
-          alreadyExtractedURLs.add(normalizeUrl(chunk.metadata.url));
-        });
-      }
-    });
-
-    const filteredResults = pickedResults.filter(
-      (r) => !alreadyExtractedURLs.has(normalizeUrl(r.metadata.url)),
-    );
-
-    pickSpan.end({
-      pickedCount: pickedResults.length,
-      alreadyReadCount: pickedResults.length - filteredResults.length,
-      urls: filteredResults.map((r) => r.metadata.url),
-    });
-
-    if (filteredResults.length > 0) {
-      researchBlock.data.subSteps.push({
-        id: crypto.randomUUID(),
-        type: 'reading',
-        reading: filteredResults,
+  researchBlock.data.subSteps.forEach((step) => {
+    if (step.type === 'reading') {
+      step.reading.forEach((chunk) => {
+        alreadyExtractedURLs.add(normalizeUrl(chunk.metadata.url));
       });
-
-      input.session.updateBlock(researchBlock.id, [
-        {
-          path: '/data/subSteps',
-          op: 'replace',
-          value: researchBlock.data.subSteps,
-        },
-      ]);
     }
+  });
 
-    const extractedFacts: Chunk[] = [];
+  const filteredResults = pickedResults.filter(
+    (r) => !alreadyExtractedURLs.has(normalizeUrl(r.metadata.url)),
+  );
 
-    const extractorPrompt = `
+  pickSpan.end({
+    pickedCount: pickedResults.length,
+    alreadyReadCount: pickedResults.length - filteredResults.length,
+    urls: filteredResults.map((r) => r.metadata.url),
+  });
+
+  if (filteredResults.length > 0) {
+    researchBlock.data.subSteps.push({
+      id: crypto.randomUUID(),
+      type: 'reading',
+      reading: filteredResults,
+    });
+
+    input.session.updateBlock(researchBlock.id, [
+      {
+        path: '/data/subSteps',
+        op: 'replace',
+        value: researchBlock.data.subSteps,
+      },
+    ]);
+  }
+
+  const extractedFacts: Chunk[] = [];
+
+  const extractorPrompt = `
       Assistant is an AI information extractor. Assistant will be shared with scraped information from a website along with the queries used to retrieve that information. Assistant's task is to extract relevant facts from the scraped data to answer the queries.
 
       ## Things to taken into consideration when extracting information:
@@ -432,89 +595,86 @@ export const executeSearch = async (input: {
       </example_output>
       `;
 
-    const extractorSchema = z.object({
-      extracted_facts: z
-        .string()
-        .describe(
-          'The extracted facts that are relevant to the query and can help in answering the question should be listed here in a concise manner.',
-        ),
-    });
+  const extractorSchema = z.object({
+    extracted_facts: z
+      .string()
+      .describe(
+        'The extracted facts that are relevant to the query and can help in answering the question should be listed here in a concise manner.',
+      ),
+  });
 
-    await Promise.all(
-      filteredResults.map(async (result, i) => {
-        try {
-          const scrapedData = await Scraper.scrape(
-            result.metadata.url,
-            trace,
-          ).catch((err) => {
-            console.log('Error scraping data from', result.metadata.url, err);
-            trace.error(`fetch ${result.metadata.url}`, err);
-          });
+  await Promise.all(
+    filteredResults.map(async (result, i) => {
+      try {
+        const scrapedData = await Scraper.scrape(
+          result.metadata.url,
+          trace,
+        ).catch((err) => {
+          console.log('Error scraping data from', result.metadata.url, err);
+          trace.error(`fetch ${result.metadata.url}`, err);
+        });
 
-          if (!scrapedData) return;
+        if (!scrapedData) return;
 
-          let accumulatedContent = '';
-          const chunks = splitText(scrapedData.content, 4000, 500);
+        let accumulatedContent = '';
+        const chunks = splitText(scrapedData.content, 4000, 500);
 
-          await Promise.all(
-            chunks.map(async (chunk, chunkIndex) => {
-              const extractStartedAt = Date.now();
-              try {
-                const extractorOutput = await input.llm.generateObject<
-                  typeof extractorSchema
-                >({
-                  schema: extractorSchema,
-                  messages: [
-                    {
-                      role: 'system',
-                      content: extractorPrompt,
-                    },
-                    {
-                      role: 'user',
-                      content: `<queries>${input.queries.join(', ')}</queries>\n<scraped_data>${chunk}</scraped_data>`,
-                    },
-                  ],
-                });
+        await Promise.all(
+          chunks.map(async (chunk, chunkIndex) => {
+            const extractStartedAt = Date.now();
+            try {
+              const extractorOutput = await input.llm.generateObject<
+                typeof extractorSchema
+              >({
+                schema: extractorSchema,
+                messages: [
+                  {
+                    role: 'system',
+                    content: extractorPrompt,
+                  },
+                  {
+                    role: 'user',
+                    content: `<queries>${input.queries.join(', ')}</queries>\n<scraped_data>${chunk}</scraped_data>`,
+                  },
+                ],
+              });
 
-                accumulatedContent += extractorOutput.extracted_facts + '\n';
+              accumulatedContent += extractorOutput.extracted_facts + '\n';
 
-                trace.event('extract', {
-                  url: result.metadata.url,
-                  chunkIndex,
-                  durationMs: Date.now() - extractStartedAt,
-                  outputChars: extractorOutput.extracted_facts?.length ?? 0,
-                });
-              } catch (err) {
-                console.log('Error extracting information from chunk', err);
+              trace.event('extract', {
+                url: result.metadata.url,
+                chunkIndex,
+                durationMs: Date.now() - extractStartedAt,
+                outputChars: extractorOutput.extracted_facts?.length ?? 0,
+              });
+            } catch (err) {
+              console.log('Error extracting information from chunk', err);
 
-                trace.event('extract', {
-                  url: result.metadata.url,
-                  chunkIndex,
-                  durationMs: Date.now() - extractStartedAt,
-                  outputChars: 0,
-                  error: err instanceof Error ? err.message : String(err),
-                });
-              }
-            }),
-          );
+              trace.event('extract', {
+                url: result.metadata.url,
+                chunkIndex,
+                durationMs: Date.now() - extractStartedAt,
+                outputChars: 0,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }),
+        );
 
-          extractedFacts.push({
-            ...result,
-            content: accumulatedContent,
-          });
-        } catch (err) {
-          console.log(
-            'Error scraping or extracting information from',
-            result.metadata.url,
-            err,
-          );
-          trace.error(`read ${result.metadata.url}`, err);
-        }
-      }),
-    );
+        extractedFacts.push({
+          ...result,
+          content: accumulatedContent,
+        });
+      } catch (err) {
+        console.log(
+          'Error scraping or extracting information from',
+          result.metadata.url,
+          err,
+        );
+        trace.error(`read ${result.metadata.url}`, err);
+      }
+    }),
+  );
 
-    return extractedFacts;
-  } else {
-    return [];
-  }
+  return extractedFacts;
 };
