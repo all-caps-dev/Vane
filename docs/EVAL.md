@@ -26,7 +26,7 @@ The date is UTC. The folder is created on demand. API keys, base URLs and Author
 Top-level fields: `requestId`, `startedAt` (UTC), `traceMode` (`on` or `full`), `totalMs`, `agent` (`chat` for the web UI, `api` for `/api/search`), `mode` (speed, balanced, quality), `sourceCount`, `citations`, `errors`, `spans` and `events`. Span and event times are milliseconds since the request started.
 
 Spans: `classify`, `widgets`, `research`, `rerank` (M2), `pick` (quality with reranker `off` only), `write`. The M1 `embed` span is gone: embedding similarity now runs inside the `rerank` span when the embedding reranker is used.
-Events: `request`, `research.iteration`, `research.actions`, `search.plan` (M3), `search.query`, `fetch`, `chunk`, `rerank.fallback`, `select`, `evidence`, `extract` (reranker `off` only), `gap` (M3), `dedup`, `sources`, `citations`, `citations.removed`.
+Events: `request`, `research.iteration`, `research.actions`, `search.plan` (M3), `search.query`, `fetch`, `chunk`, `rerank.fallback`, `select`, `evidence`, `extract` (reranker `off` only), `gap` (M3), `budget.exhausted`, `dedup`, `sources`, `citations`, `citations.removed`.
 
 Fields added in M1:
 
@@ -184,6 +184,37 @@ Behaviour fixes with no change to prompts or ranking.
 - **One HTML parse per page** (`ScrapeResult.articleHtml`, `chunkDocument(html, { articleHtml })`). The scraper already runs JSDOM and Readability; it now returns Readability's article HTML as `articleHtml`, and the evidence pipeline hands it to `chunkDocument`, which then skips its own page parse and Readability pass. `html` is still returned. The scraper now lifts Wikipedia-style wrapped headings before Readability (as `chunkDocument` always did), so `text` may gain a few section headings. Measured on the 2 MB cap of en.wikipedia.org/wiki/United_States (3 runs, Apple M4 Pro): chunking took 1257 ms before and 307 ms after, with identical chunks (171).
 - **Reranker warm-up** (`src/lib/rerank/warmup.ts`, called from `src/instrumentation.ts`, Node runtime only). When the reranker is `transformers`, the model starts loading in the background at server start and one line is logged: `Reranker <model> (<dtype>) ready in N ms` or `Reranker <model> warm-up failed: ...`. Startup never waits for it and it never throws; a failed warm-up means the first search tries the load again, as before.
 - **One retry on a connection error** (`src/lib/models/providers/openai/connectionRetry.ts`). In the OpenAI provider's `generateObject` and `generateText` (not `streamText`), a call that fails with the SDK's `APIConnectionError`, or with `ECONNREFUSED`, `other side closed` or `fetch failed` anywhere in its error or cause chain, waits 2.5 s and runs once more, with one `console.warn` line. A second failure is thrown. Timeouts (`APIConnectionTimeoutError`) are not retried, since that would wait the whole timeout again. The SDK's own quick retries still run first.
+
+## Budgets
+
+Every request has hard limits, enforced in code (`src/lib/agents/search/budgets.ts`), not asked for in a prompt. They were set on 2026-11-01 after quality mode on the 2-core, 4 GB deploy box took 238 to 666 s per question with 59 to 115 sources, 80 to 144 page fetches and 9 to 25 researcher iterations, and was then OOM-killed on a single question. Balanced mode on the same questions took about 41 s with 8 sources and a judged fact score of 0.74.
+
+| Budget                                 | Speed | Balanced | Quality | What happens when it runs out                                                      |
+| -------------------------------------- | ----- | -------- | ------- | ---------------------------------------------------------------------------------- |
+| `maxFetches` (pages fetched)           | 0     | 12       | 24      | No more pages are read; the remaining results stay search snippets                 |
+| `maxBrowserFetches` (Playwright tries) | 0     | 3        | 6       | Thin or failed pages are not retried in the browser; thin HTTP text is kept        |
+| `maxSearchCalls` (research searches)   | 1     | 4        | 8       | Further searches return nothing and the research loop stops                        |
+| `maxResearchMs` (research loop time)   | 30 s  | 90 s     | 180 s   | No new research iteration starts; the gap round and the writer run with what is in |
+| Research iterations (`MAX_ITERATIONS`) | 2     | 6        | 6       | The loop ends                                                                      |
+| Gap rounds (`MAX_GAP_ROUNDS`)          | 0     | 1        | 2       | The second quality round runs only if the first found gaps and new sources arrived |
+
+- The Researcher creates one `RequestBudget` per request and puts it on the session next to the tracer. `executeSearch` takes one search call per search and `Scraper.scrape` takes one fetch per page and one browser fetch per Playwright fallback. Gap-round searches do not take search calls (the round count caps them) but do take fetches. `scrape_url` (a page the user named) is not budgeted.
+- Pages per search are still capped too: 6 in balanced and 8 in quality (was 10). The quality evidence budget stays at 1.5 times the base.
+- A PDF or any other non-page content type, and any URL ending in a download extension such as `.pdf`, is never sent to the browser fallback.
+- Override any number with `VANE_BUDGET_<MODE>_<NAME>`, for example `VANE_BUDGET_QUALITY_MAX_FETCHES=30` or `VANE_BUDGET_BALANCED_MAX_RESEARCH_MS=120000`. Names are `MAX_FETCHES`, `MAX_BROWSER_FETCHES`, `MAX_SEARCH_CALLS` and `MAX_RESEARCH_MS`. The variables are read once per process; a value that is not a whole number of zero or more is ignored. Iterations and gap rounds have no variable.
+
+Trace fields:
+
+- `budget.exhausted` event, once per budget per request: `budget` (the name above), `limit`, `elapsedMs` (since research started).
+- `research` span: `budget` (the limits in force), `stoppedBy` (`maxResearchMs` or `maxSearchCalls` when a budget ended the loop) and `budgetUsed` (fetches, browser fetches and search calls taken, and which budgets ran out).
+- `fetch` event: `browserSkipped` (`content-type`, `download` or `budget`) when the browser fallback was not tried, with `contentType` for a refused type; `outcome: 'skipped'` with `reason: 'budget'` when the fetch budget was already spent.
+- `gap` event: `round` (1 or 2).
+
+To measure quality mode after a deploy, run the full 30-fixture set (not the 3-fixture example file) with a timeout above the 180 s research budget plus the writer, then compare it with a balanced run of the same fixtures:
+
+```
+node scripts/eval/run.ts --url http://127.0.0.1:3000 --fixtures <30-fixture file> --mode quality --timeout 420000 --out data/eval
+```
 
 ## Run the tests
 

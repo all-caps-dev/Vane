@@ -20,6 +20,7 @@ import { buildResearcherUserMessage, formatResearchDigest } from './context';
 import { queryKey, queryTexts } from './actions/search/queryPlan';
 import { executeSearch } from './actions/search/baseSearch';
 import { runGapCheck } from '../gapCheck';
+import { MAX_GAP_ROUNDS, MAX_ITERATIONS, RequestBudget } from '../budgets';
 
 /*
   What the researcher LLM gets back for one tool call (M3): a compact digest
@@ -53,12 +54,7 @@ class Researcher {
     input: ResearcherInput,
   ): Promise<ResearcherOutput> {
     let actionOutput: ActionOutput[] = [];
-    let maxIteration =
-      input.config.mode === 'speed'
-        ? 2
-        : input.config.mode === 'balanced'
-          ? 6
-          : 25;
+    const maxIteration = MAX_ITERATIONS[input.config.mode] ?? 2;
 
     const availableTools = ActionRegistry.getAvailableActionTools({
       classification: input.classification,
@@ -77,9 +73,14 @@ class Researcher {
 
     /* Per-request tracer; a no-op unless tracing is on. */
     const trace = session.trace;
+    /* Per-request budgets (budgets.ts), on the session next to the tracer
+       so executeSearch and the scraper take from the same counters. */
+    const budget = RequestBudget.forMode(input.config.mode, trace);
+    session.budget = budget;
     const researchSpan = trace.span('research', {
       maxIteration,
       tools: availableTools.map((t) => t.name),
+      budget: budget.limits,
     });
     let iterationsRun = 0;
     const researchStartedAt = Date.now();
@@ -117,7 +118,18 @@ class Researcher {
 
     const agentMessageHistory: Message[] = [userMessage()];
 
+    // Why the loop ended early because of a budget, if it did.
+    let stoppedBy: 'maxResearchMs' | 'maxSearchCalls' | undefined;
+
     for (let i = 0; i < maxIteration; i++) {
+      // Out of research time: go to the gap round and the writer with what
+      // has been found so far.
+      if (budget.timeExceeded()) {
+        stoppedBy = 'maxResearchMs';
+        budget.markExhausted('maxResearchMs');
+        break;
+      }
+
       agentMessageHistory[0] = userMessage();
 
       const researcherPrompt = getResearcherPrompt(
@@ -271,6 +283,13 @@ class Researcher {
           content: toolResultContent(action, allResults),
         });
       });
+
+      // Every search call is spent: another planning turn could not search.
+      if (budget.remaining('maxSearchCalls') === 0) {
+        stoppedBy = 'maxSearchCalls';
+        budget.markExhausted('maxSearchCalls');
+        break;
+      }
     }
 
     const loopMs = Date.now() - researchStartedAt;
@@ -279,47 +298,56 @@ class Researcher {
         .filter((a) => a.type === 'search_results')
         .flatMap((a) => a.results);
 
-    /* ---- One bounded evidence-gap round (M3, balanced and quality) ---- */
+    /* ---- Bounded evidence-gap rounds (M3): one in balanced, at most two
+       in quality. The second runs only when the first named gaps, its
+       search brought new sources, and research time is left. Gap searches
+       do not take from maxSearchCalls but do take from the fetch budgets. */
 
     let evidenceNotes: EvidenceNotes | undefined;
     const researchBlock = session.getBlock(researchBlockId) as
       | ResearchBlock
       | undefined;
+    const maxGapRounds = MAX_GAP_ROUNDS[input.config.mode] ?? 1;
 
     if (researchBlock && researchBlock.type === 'research') {
       const question =
         input.classification.standaloneFollowUp || input.followUp;
-      const sourcesBefore = groupBySource(collectResults());
 
-      const gap = await runGapCheck({
-        llm: input.config.llm,
-        session,
-        researchBlock,
-        mode: input.config.mode,
-        webEnabled:
-          input.config.sources.includes('web') &&
-          !input.classification.classification.skipSearch,
-        question,
-        classification: input.classification,
-        sources: sourcesBefore,
-        alreadyRun: queriesRun,
-        researchMs: loopMs,
-        // The same search path as web_search, on the same research block,
-        // so the UI shows the 'searching' step.
-        search: ({ queries, searchConfig }) =>
-          executeSearch({
-            llm: input.config.llm,
-            embedding: input.config.embedding,
-            mode: input.config.mode,
-            queries,
-            researchBlock,
-            session,
-            question,
-            searchConfig,
-          }),
-      });
+      for (let round = 1; round <= Math.max(1, maxGapRounds); round++) {
+        const sourcesBefore = groupBySource(collectResults());
+        const roundStartedAt = Date.now();
 
-      if (gap.ran) {
+        const gap = await runGapCheck({
+          llm: input.config.llm,
+          session,
+          researchBlock,
+          mode: input.config.mode,
+          webEnabled:
+            input.config.sources.includes('web') &&
+            !input.classification.classification.skipSearch,
+          question,
+          classification: input.classification,
+          sources: sourcesBefore,
+          alreadyRun: queriesRun,
+          researchMs: loopMs,
+          // The same search path as web_search, on the same research block,
+          // so the UI shows the 'searching' step.
+          search: ({ queries, searchConfig }) =>
+            executeSearch({
+              llm: input.config.llm,
+              embedding: input.config.embedding,
+              mode: input.config.mode,
+              queries,
+              researchBlock,
+              session,
+              question,
+              searchConfig,
+              countsAsSearchCall: false,
+            }),
+        });
+
+        if (!gap.ran) break;
+
         if (gap.newResults.length > 0) {
           actionOutput.push({
             type: 'search_results',
@@ -327,17 +355,24 @@ class Researcher {
           });
         }
         rememberQueries(gap.queriesRun);
+        // The latest round saw every source so far, so its notes win.
         evidenceNotes = gap.notes;
 
+        const newSources =
+          groupBySource(collectResults()).length - sourcesBefore.length;
+
         trace.event('gap', {
+          round,
           covered: gap.covered,
           gapCount: gap.notes?.gaps.length ?? 0,
           conflictCount: gap.notes?.conflicts.length ?? 0,
           queriesRun: gap.queriesRun,
-          newSources:
-            groupBySource(collectResults()).length - sourcesBefore.length,
-          durationMs: Date.now() - researchStartedAt - loopMs,
+          newSources,
+          durationMs: Date.now() - roundStartedAt,
         });
+
+        const foundGaps = (gap.notes?.gaps.length ?? 0) > 0;
+        if (!foundGaps || newSources <= 0 || budget.timeExceeded()) break;
       }
     }
 
@@ -365,6 +400,8 @@ class Researcher {
       // The loop alone, without the gap round (the gap budget uses this).
       loopMs,
       queriesRun: queriesRun.length,
+      stoppedBy,
+      budgetUsed: budget.usage(),
     });
 
     /* One entry per source, so the UI cards show pages, not passages. */

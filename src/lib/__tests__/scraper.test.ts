@@ -8,13 +8,13 @@ vi.mock('node:dns', () => ({
 }));
 
 // The browser must never start in these tests: make launching it fail.
-vi.mock('playwright', () => ({
-  chromium: {
-    launch: async () => {
-      throw new Error('no browser in tests');
-    },
-  },
+// The spy counts how often the fallback was attempted.
+const { launch } = vi.hoisted(() => ({
+  launch: vi.fn(async () => {
+    throw new Error('no browser in tests');
+  }),
 }));
+vi.mock('playwright', () => ({ chromium: { launch } }));
 
 // A stand-in undici Agent that records the options it was built with, so the
 // tests can call the pinned lookup the real Agent would use to connect.
@@ -35,11 +35,13 @@ vi.mock('undici', () => ({
 import Scraper, {
   HostVerdictCache,
   httpFetch,
+  isDownloadUrl,
   MIN_TEXT_CHARS,
   pinnedLookup,
   SUBRESOURCE_DNS_TTL_MS,
   subresourceBlockReason,
 } from '@/lib/scraper';
+import { RequestBudget } from '@/lib/agents/search/budgets';
 import { BlockedUrlError } from '@/lib/utils/safeUrl';
 
 const fetchMock = vi.fn();
@@ -81,6 +83,7 @@ beforeEach(() => {
   );
   fetchMock.mockReset();
   agents.length = 0;
+  launch.mockClear();
   vi.stubGlobal('fetch', fetchMock);
   vi.spyOn(console, 'log').mockImplementation(() => undefined);
 });
@@ -353,5 +356,86 @@ describe('Scraper.scrape articleHtml', () => {
     const res = await Scraper.scrape('https://site.test/a.txt');
     expect(res.html).toBeUndefined();
     expect(res.articleHtml).toBeUndefined();
+  });
+});
+
+describe('Scraper.scrape: downloads and budgets', () => {
+  const budgetOf = (maxFetches: number, maxBrowserFetches: number) =>
+    new RequestBudget({
+      maxFetches,
+      maxBrowserFetches,
+      maxSearchCalls: 1,
+      maxResearchMs: 60_000,
+    });
+
+  it('recognises download URLs', () => {
+    expect(isDownloadUrl('https://site.test/paper.PDF')).toBe(true);
+    expect(isDownloadUrl('https://site.test/a.zip?x=1')).toBe(true);
+    expect(isDownloadUrl('https://site.test/article')).toBe(false);
+    expect(isDownloadUrl('https://site.test/page.html')).toBe(false);
+    expect(isDownloadUrl('not a url')).toBe(false);
+  });
+
+  it('never sends a PDF content type to the browser', async () => {
+    fetchMock.mockResolvedValueOnce(
+      reply('%PDF-1.7', 200, { 'content-type': 'application/pdf' }),
+    );
+    const { tracer, events } = fakeTrace();
+
+    const res = await Scraper.scrape('https://site.test/doc', tracer);
+
+    expect(res.failed).toBe(true);
+    expect(launch).not.toHaveBeenCalled();
+    expect(events[0].data).toMatchObject({
+      method: 'http',
+      outcome: 'error',
+      fallbackReason: 'content-type',
+      browserSkipped: 'content-type',
+      contentType: 'application/pdf',
+    });
+  });
+
+  it('never sends a .pdf URL to the browser, even when HTTP fails otherwise', async () => {
+    fetchMock.mockResolvedValueOnce(reply('nope', 403));
+    const { tracer, events } = fakeTrace();
+
+    const res = await Scraper.scrape('https://site.test/report.pdf', tracer);
+
+    expect(res.failed).toBe(true);
+    expect(launch).not.toHaveBeenCalled();
+    expect(events[0].data).toMatchObject({ browserSkipped: 'download' });
+  });
+
+  it('skips the browser once the browser budget is spent and keeps thin text', async () => {
+    const budget = budgetOf(5, 1);
+    fetchMock.mockImplementation(async () => reply(article(100)));
+    const { tracer, events } = fakeTrace();
+
+    await Scraper.scrape('https://site.test/one', tracer, budget);
+    expect(launch).toHaveBeenCalledTimes(1);
+
+    const res = await Scraper.scrape('https://site.test/two', tracer, budget);
+    expect(launch).toHaveBeenCalledTimes(1);
+    expect(res.failed).toBeUndefined();
+    expect(res.title).toBe('T');
+    expect(events[1].data).toMatchObject({
+      method: 'http',
+      outcome: 'ok',
+      browserSkipped: 'budget',
+    });
+    expect(budget.isExhausted('maxBrowserFetches')).toBe(true);
+  });
+
+  it('fetches nothing once the fetch budget is spent', async () => {
+    const budget = budgetOf(1, 1);
+    fetchMock.mockImplementation(async () =>
+      reply(article(MIN_TEXT_CHARS * 2)),
+    );
+
+    await Scraper.scrape('https://site.test/a', undefined, budget);
+    const res = await Scraper.scrape('https://site.test/b', undefined, budget);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res).toMatchObject({ failed: true, budgetExhausted: true });
   });
 });

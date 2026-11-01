@@ -4,6 +4,7 @@ import { Mutex } from 'async-mutex';
 import net from 'node:net';
 import { Agent } from 'undici';
 import type { Tracer } from './trace';
+import type { RequestBudget } from './agents/search/budgets';
 import {
   ApprovedAddress,
   assertPublicHttpUrl,
@@ -29,6 +30,28 @@ export const MIN_TEXT_CHARS = 400;
 
 const ACCEPTED_TYPES = ['text/html', 'application/xhtml+xml', 'text/plain'];
 
+// File types the browser would download rather than render (Playwright
+// fails with "Download is starting"). Never sent to the browser fallback.
+const DOWNLOAD_EXTENSIONS = new Set(
+  (
+    'pdf doc docx xls xlsx ppt pptx odt ods odp rtf epub csv ' +
+    'zip gz tgz tar bz2 xz 7z rar exe msi dmg pkg deb rpm apk iso img bin ' +
+    'mp3 mp4 m4a mov avi mkv webm wav flac ogg ' +
+    'png jpg jpeg gif webp svg tif tiff bmp ico'
+  ).split(' '),
+);
+
+// True when the URL's path ends in a download extension such as .pdf.
+export const isDownloadUrl = (url: string): boolean => {
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    const ext = /\.([a-z0-9]{1,5})$/.exec(path)?.[1];
+    return ext !== undefined && DOWNLOAD_EXTENSIONS.has(ext);
+  } catch {
+    return false;
+  }
+};
+
 export type HttpFetchResult =
   | {
       ok: true;
@@ -37,7 +60,7 @@ export type HttpFetchResult =
       contentType: string;
       body: string;
     }
-  | { ok: false; status?: number; reason: string };
+  | { ok: false; status?: number; reason: string; contentType?: string };
 
 // True when the Content-Type header names a type we can read as a page.
 export const isAcceptedContentType = (header: string | null): boolean => {
@@ -219,7 +242,12 @@ export const httpFetch = async (url: string): Promise<HttpFetchResult> => {
       const contentType = res.headers.get('content-type') ?? '';
       if (!isAcceptedContentType(contentType)) {
         await res.body?.cancel().catch(() => undefined);
-        return { ok: false, status: res.status, reason: 'content-type' };
+        return {
+          ok: false,
+          status: res.status,
+          reason: 'content-type',
+          contentType: contentType.split(';')[0].trim().toLowerCase(),
+        };
       }
 
       const bytes = await readCapped(res, HTTP_MAX_BYTES);
@@ -282,7 +310,9 @@ const formatContent = (title: string, url: string, text: string) => `
      Undefined when there is no html or Readability found no article.
    - text: the readable plain text (no "# title - url" header line).
    - fetchedAt: when the fetch finished, as a UTC ISO string.
-   - failed: true when nothing could be read (blocked, error, timeout). */
+   - failed: true when nothing could be read (blocked, error, timeout).
+   - budgetExhausted: true when the request's fetch budget was spent, so
+     nothing was fetched (failed is true as well). */
 export type ScrapeResult = {
   content: string;
   title: string;
@@ -291,6 +321,7 @@ export type ScrapeResult = {
   text: string;
   fetchedAt: string;
   failed?: boolean;
+  budgetExhausted?: boolean;
 };
 
 const failedResult = (url: string): ScrapeResult => ({
@@ -504,7 +535,14 @@ class Scraper {
     }
   }
 
-  static async scrape(url: string, trace?: Tracer): Promise<ScrapeResult> {
+  /* budget: the request's RequestBudget. Each call takes one fetch; the
+     browser fallback also takes one browser fetch. Without a budget nothing
+     is limited (scrape_url and other callers). */
+  static async scrape(
+    url: string,
+    trace?: Tracer,
+    budget?: RequestBudget,
+  ): Promise<ScrapeResult> {
     const startedAt = Date.now();
 
     /* One 'fetch' trace event per scrape. outcome is 'ok', 'empty' (no
@@ -519,8 +557,15 @@ class Scraper {
       }
     };
 
+    // 0. Fetch budget: when spent, fetch nothing.
+    if (budget && !budget.take('maxFetches')) {
+      traceFetch({ outcome: 'skipped', reason: 'budget', contentChars: 0 });
+      return { ...failedResult(url), budgetExhausted: true };
+    }
+
     let httpStatus: number | undefined;
     let fallbackReason: string | undefined;
+    let httpContentType: string | undefined;
     // Kept so a thin HTTP result can still be used if the browser fails.
     let thin:
       | { title: string; text: string; html?: string; articleHtml?: string }
@@ -564,6 +609,7 @@ class Scraper {
         fallbackReason = 'thin';
       } else {
         fallbackReason = res.reason;
+        httpContentType = res.contentType;
       }
     } catch (err) {
       if (err instanceof BlockedUrlError) {
@@ -589,8 +635,47 @@ class Scraper {
       return failedResult(url);
     }
 
-    // 2. Browser, only because HTTP failed or was thin. The URL already
-    //    passed assertPublicHttpUrl inside httpFetch.
+    // 2. Browser, only because HTTP failed or was thin, and never for a
+    //    download (a PDF or any other non-page type) or once the request's
+    //    browser budget is spent. Then the thin HTTP text, if any, is used.
+    const browserSkipped =
+      fallbackReason === 'content-type'
+        ? 'content-type'
+        : isDownloadUrl(url)
+          ? 'download'
+          : budget && !budget.take('maxBrowserFetches')
+            ? 'budget'
+            : undefined;
+
+    if (browserSkipped) {
+      const skipData = { browserSkipped, httpStatus, fallbackReason };
+      if (thin && thin.text) {
+        traceFetch({
+          title: thin.title,
+          method: 'http',
+          outcome: 'ok',
+          contentChars: thin.text.length,
+          ...skipData,
+        });
+        return {
+          content: formatContent(thin.title, url, thin.text),
+          title: thin.title,
+          html: thin.html,
+          text: thin.text,
+          fetchedAt: new Date().toISOString(),
+        };
+      }
+      traceFetch({
+        method: 'http',
+        outcome: 'error',
+        contentChars: 0,
+        ...(httpContentType ? { contentType: httpContentType } : {}),
+        ...skipData,
+      });
+      return failedResult(url);
+    }
+
+    // The URL already passed assertPublicHttpUrl inside httpFetch.
     // The first request the in-browser guard refused, if any (for the trace).
     let browserBlocked: { blocked: true; reason: string } | undefined;
     const onBlocked = (reason: string) => {
