@@ -133,7 +133,7 @@ M2 is about evidence quality: what the writer is given to cite. Between "SearXNG
 
 New trace fields:
 
-- `rerank` span: `stage` (`snippets` or `passages`), `reranker` (configured), `usedReranker` (what actually produced the order after any fallback), `candidates`, `topK`, `durationMs`.
+- `rerank` span: `stage` (`snippets` or `passages`; `scrape` and `uploads` since the uploads change below), `reranker` (configured), `usedReranker` (what actually produced the order after any fallback), `candidates`, `topK`, `durationMs`.
 - `rerank.fallback` event: `reason`, `from`, `to`.
 - `chunk` event, one per page read: `url`, `chunks`, `kept` (passages sent to the reranker), `extraction` (`ok`, or `thin` under 400 characters).
 - `select` event: `budget`, `candidates`, `selected`, `distinctSources`, `droppedDuplicates`.
@@ -168,6 +168,17 @@ New trace fields:
 - `search.plan` event, one per `web_search` call: `queries` (`query` and `purpose` each) and `timeRange`.
 - `research` span: `loopMs` (the loop alone, which the 60 s gap budget uses) and `queriesRun` (count).
 - `gap` event: when it ran, `covered`, `gapCount`, `conflictCount`, `queriesRun` (the gap queries actually searched), `newSources` and `durationMs`; when skipped, `skipped` (`mode`, `time` or `no_web`) and `researchMs`; when the check failed, `error: true`.
+
+## Uploads and scrape_url on the evidence path
+
+After M3, `uploads_search` and `scrape_url` still returned pre-M2 chunks (no `sourceKind`, no stable ids, an LLM extractor on long scraped pages). They now use the same rerank-and-select steps as web search, moved into a shared module, `src/lib/evidence/pipeline.ts` (`rerankEvidence`, `finishSelection`, `budgetFor`, the per-source cap and the rerank timeouts); `baseSearch.ts` imports it.
+
+- **scrape_url** (`researcher/actions/scrapeURL.ts`). Each page (at most 3) is chunked with `chunkDocument` (HTML) or `chunkText` (plain text), the first 40 passages of each become `full_page` evidence, reranked against the standalone question, and selected within the evidence budget (quality 1.5x). One page may fill the budget (no 4-per-source cap) and every page read keeps at least its best passage. A page that could not be read is returned after the selection as one passage with `extraction: 'failed'`. The per-chunk LLM extractor runs only when the reranker is `off`, exactly as before. The UI gets the `reading` step as before and a `ranking` step.
+- **uploads_search** (`researcher/actions/uploadsSearch.ts`). `UploadStore.query` now asks for 30 candidates (was 10). Each becomes an `upload` passage: `url` and `canonicalUrl` are `file_id://<fileId>`, `sourceId` is `sourceIdFor('file_id://<fileId>')` (the same id `groupBySource` derives), `chunkId` is `<sourceId>:c<n>` where `n` is the chunk's position in the file's stored chunks, and `headingPath` is empty. A chunk the store returns twice (once per query) is dropped before the rerank. The cap per file is the larger of 4 and the budget divided by the number of files, so a single uploaded file can fill the budget. The `upload_searching` and `upload_search_results` steps are unchanged (one card per file); a `ranking` step sits between them.
+- **Upload chunking** (`src/lib/uploads/manager.ts`). New uploads are split with `chunkText` (at most 350 tokens, paragraph and sentence aware) instead of `splitText(512, 128)`. Only the text is stored, so `.content.json` keeps its `{ content, embedding }` shape and files uploaded earlier load and search as before.
+- **Prompts.** The academic, discussion and uploads tool descriptions follow the M3 query rules (one query for a simple question, two or three only when the question has parts, entities verbatim, a year only for recent or current questions, no repeats), with new examples. The `__reasoning_preamble` examples no longer promise a "comprehensive answer".
+
+Trace: the `rerank` span's `stage` can now also be `scrape` or `uploads`; `chunk`, `select` and `evidence` events are recorded for scrape_url, and `select` and `evidence` for uploads_search.
 
 ## M4: model thinking for internal calls
 

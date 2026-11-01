@@ -18,10 +18,17 @@ import {
   Evidence,
   evidenceToChunk,
   pageToEvidence,
-  selectEvidence,
   snippetToEvidence,
 } from '@/lib/evidence';
-import { getReranker, Reranker, rerankSafely } from '@/lib/rerank';
+import {
+  budgetFor,
+  finishSelection,
+  PASSAGE_RERANK_TIMEOUT_MS,
+  rerankEvidence,
+  SelectionStats,
+  SNIPPET_RERANK_TIMEOUT_MS,
+} from '@/lib/evidence/pipeline';
+import { getReranker } from '@/lib/rerank';
 import {
   getBalancedReadsPages,
   getEvidenceBudget,
@@ -39,12 +46,8 @@ const FETCH_CONCURRENCY = 4;
 // Only the first chunks of a long page go to the reranker, so a 2-core box
 // scores at most ~120 passages per search (about 8 s on the deploy box).
 const MAX_CHUNKS_PER_PAGE = 12;
-// Passages per source and the number of distinct sources to aim for.
-const MAX_PER_SOURCE = 4;
-const MIN_SOURCES = 3;
-// Rerank time limits; on timeout the embedding reranker is used instead.
-const SNIPPET_RERANK_TIMEOUT_MS = 10000;
-const PASSAGE_RERANK_TIMEOUT_MS = 30000;
+// The per-source cap, minimum sources and rerank timeouts live in
+// src/lib/evidence/pipeline.ts, shared with scrape_url and uploads_search.
 
 /* Runs one SearXNG query. A failing query is recorded on the trace and
    returns null, so the other queries of the same search still count. */
@@ -251,9 +254,7 @@ export const executeSearch = async (input: SearchInput): Promise<Chunk[]> => {
   if (candidates.length === 0) return [];
 
   const reranker = await getReranker(input.embedding, trace);
-  const baseBudget = getEvidenceBudget();
-  const budget =
-    input.mode === 'quality' ? Math.round(baseBudget * 1.5) : baseBudget;
+  const budget = budgetFor(input.mode, getEvidenceBudget());
 
   // Shows the UI how many passages were ranked and kept (M3). Real counts
   // only; nothing is estimated.
@@ -412,103 +413,6 @@ export const executeSearch = async (input: SearchInput): Promise<Chunk[]> => {
   );
 
   return finishSelection(rankedPassages, budget, trace, reportRanking);
-};
-
-/*
-  Reranks evidence against the question and returns it best first with
-  `score` set. Never throws: rerankSafely falls back to embeddings, then to
-  the given order. Records the 'rerank' span.
-*/
-const rerankEvidence = async (args: {
-  stage: string;
-  items: Evidence[];
-  reranker: Reranker;
-  question: string;
-  timeoutMs: number;
-  embedding: BaseEmbedding<any>;
-  trace: Trace;
-}): Promise<Evidence[]> => {
-  const { items, trace } = args;
-  const span = trace.span('rerank', {
-    stage: args.stage,
-    reranker: args.reranker.name,
-    candidates: items.length,
-    topK: items.length,
-  });
-  const startedAt = Date.now();
-
-  // The title gives the model context the passage itself may lack.
-  const passages = items.map((e, i) => ({
-    id: String(i),
-    text: e.title ? `${e.title}\n${e.text}` : e.text,
-  }));
-
-  const { results, usedReranker } = await rerankSafely(
-    args.reranker,
-    args.embedding,
-    args.question,
-    passages,
-    { timeoutMs: args.timeoutMs },
-    trace,
-  );
-
-  span.end({ durationMs: Date.now() - startedAt, usedReranker });
-
-  const ranked: Evidence[] = [];
-  const seen = new Set<number>();
-  for (const r of results) {
-    const i = Number(r.id);
-    if (!items[i] || seen.has(i)) continue;
-    seen.add(i);
-    ranked.push({ ...items[i], score: r.score });
-  }
-  // Defensive: anything the reranker did not return goes last, in order.
-  items.forEach((e, i) => {
-    if (!seen.has(i)) ranked.push(e);
-  });
-  return ranked;
-};
-
-// What a selection did, for the UI's 'ranking' step (M3).
-type SelectionStats = { candidates: number; selected: number; sources: number };
-
-// Applies the evidence budget, records 'select' and 'evidence' trace
-// events, reports the counts, and converts the result to the Chunk shape
-// callers expect.
-const finishSelection = (
-  ranked: Evidence[],
-  budget: number,
-  trace: Trace,
-  report: (stats: SelectionStats) => void,
-): Chunk[] => {
-  const { selected, distinctSources, droppedDuplicates } = selectEvidence(
-    ranked,
-    { budget, maxPerSource: MAX_PER_SOURCE, minSources: MIN_SOURCES },
-  );
-
-  report({
-    candidates: ranked.length,
-    selected: selected.length,
-    sources: distinctSources,
-  });
-
-  trace.event('select', {
-    budget,
-    candidates: ranked.length,
-    selected: selected.length,
-    distinctSources,
-    droppedDuplicates,
-  });
-  trace.event('evidence', {
-    items: selected.map((e) => ({
-      id: e.chunkId,
-      sourceKind: e.sourceKind,
-      extraction: e.extraction,
-      score: e.score,
-    })),
-  });
-
-  return selected.map(evidenceToChunk);
 };
 
 /*

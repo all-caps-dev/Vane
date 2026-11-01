@@ -37,7 +37,7 @@ class UploadStore {
 
             const chunks = UploadManager.getFileChunks(fileId);
 
-            this.records.push(...chunks.map((chunk) => ({
+            this.records.push(...chunks.map((chunk, chunkIndex) => ({
                 embedding: chunk.embedding,
                 content: chunk.content,
                 fileId: fileId,
@@ -45,6 +45,10 @@ class UploadStore {
                     fileName: file.name,
                     title: file.name,
                     url: `file_id://${file.id}`,
+                    // Position in the file's stored chunks; uploads_search
+                    // builds the passage's stable chunkId from it.
+                    chunkIndex,
+                    uploadedAt: file.uploadedAt,
                 }
             })))
         })

@@ -4,17 +4,25 @@ import { ResearchBlock } from '@/lib/types';
 import { executeSearch } from './baseSearch';
 
 const schema = z.object({
-  queries: z.array(z.string()).describe('List of academic search queries'),
+  queries: z
+    .array(z.string())
+    .describe(
+      'One to three academic search queries. Use one query for a simple question.',
+    ),
 });
 
+// M3 query rules, the same as web search's (without purposes).
 const academicSearchDescription = `
-Use this tool to perform academic searches for scholarly articles, papers, and research studies relevant to the user's query. Provide a list of concise search queries that will help gather comprehensive academic information on the topic at hand.
-You can provide up to 3 queries at a time. Make sure the queries are specific and relevant to the user's needs.
+Use this tool to search scholarly articles, papers and research studies (arXiv, Google Scholar, PubMed).
+- A simple question needs ONE query. Use two or three only when the question has separate parts, one query per part.
+- Keep the entities listed in the user message exactly as written: names, versions, gene or drug names, standard identifiers. Do not round, expand or "fix" them.
+- Add a year only when the freshness in the user message is "recent" or "current".
+- Never repeat a query listed under "Queries already run" in the user message.
+- Write queries as a researcher would type them into a scholarly search engine: the key terms, not a full sentence.
 
-For example, if the user is interested in recent advancements in renewable energy, your queries could be:
-1. "Recent advancements in renewable energy 2024"
-2. "Cutting-edge research on solar power technologies"
-3. "Innovations in wind energy systems"
+Examples:
+- "What does the evidence say about intermittent fasting and HbA1c?" -> ["intermittent fasting HbA1c randomized trial"]
+- "How do transformers and state space models compare on long-context benchmarks?" -> ["transformer long-context benchmark", "state space model long-context benchmark"]
 
 If this tool is present and no other tools are more relevant, you MUST use this tool to get the needed academic information.
 `;
@@ -24,7 +32,7 @@ const academicSearchAction: ResearchAction<typeof schema> = {
   schema: schema,
   getDescription: () => academicSearchDescription,
   getToolDescription: () =>
-    "Use this tool to perform academic searches for scholarly articles, papers, and research studies relevant to the user's query. Provide a list of concise search queries that will help gather comprehensive academic information on the topic at hand.",
+    'Search scholarly articles, papers and research studies. One query for a simple question; two or three only when the question has separate parts. Keep names, versions and identifiers verbatim; never repeat a query already run.',
   enabled: (config) =>
     config.sources.includes('academic') &&
     config.classification.classification.skipSearch === false &&

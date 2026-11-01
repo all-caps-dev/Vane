@@ -110,6 +110,36 @@ export const pageToEvidence = (
   }));
 };
 
+/* A chunk of an uploaded file becomes one upload passage. The source is the
+   file (url file_id://<id>); the chunk id uses the chunk's position in the
+   file, so the same chunk keeps its id across queries and requests. Upload
+   chunks carry no heading path. */
+export const uploadToEvidence = (chunk: {
+  fileId: string;
+  chunkIndex: number;
+  title: string;
+  text: string;
+  queries: string[];
+  uploadedAt?: string;
+}): Evidence => {
+  const url = `file_id://${chunk.fileId}`;
+  const sourceId = sourceIdFor(url);
+
+  return {
+    sourceId,
+    chunkId: chunkIdFor(sourceId, chunk.chunkIndex),
+    url,
+    canonicalUrl: url,
+    title: chunk.title,
+    fetchedAt: chunk.uploadedAt ?? new Date().toISOString(),
+    headingPath: [],
+    text: chunk.text,
+    sourceKind: 'upload',
+    extraction: 'ok',
+    queries: [...chunk.queries],
+  };
+};
+
 /* Evidence -> the existing Chunk shape. metadata.url and metadata.title are
    what the UI source cards read, so they stay; the rest rides along. */
 export const evidenceToChunk = (e: Evidence): Chunk => ({
