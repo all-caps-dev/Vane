@@ -13,6 +13,7 @@ import { sanitizeCitations } from '@/lib/utils/sanitizeCitations';
 import { Tracer, redactSecrets } from '@/lib/trace';
 import { startRequestTrace, traceAnswer, traceSources } from './trace';
 import { formatSourcesForWriter } from '@/lib/evidence';
+import { formatEvidenceNotes } from './gapCheck';
 
 class SearchAgent {
   /* Wraps the pipeline so the request trace is always finished, even when
@@ -89,8 +90,11 @@ class SearchAgent {
       llm: input.config.llm,
     });
 
+    /* Every classification field, including the M3 freshness, intent and
+       entities (entities are recorded like search queries, in 'on' mode). */
     classifySpan.end({
       ...classification.classification,
+      entityCount: classification.classification.entities.length,
       standaloneFollowUp: tracer.content(classification.standaloneFollowUp),
     });
 
@@ -158,7 +162,11 @@ class SearchAgent {
       })
       .join('\n-------------\n');
 
-    const finalContextWithWidgets = `<search_results note="These are the search results and assistant can cite these">\n${finalContext}\n</search_results>\n<widgets_result noteForAssistant="Its output is already showed to the user, assistant can use this information to answer the query but do not CITE this as a souce">\n${widgetContext}\n</widgets_result>`;
+    /* What the gap round found missing or contradictory (M3); '' when the
+       round did not run or found nothing. */
+    const evidenceNotes = formatEvidenceNotes(searchResults?.evidenceNotes);
+
+    const finalContextWithWidgets = `<search_results note="These are the search results and assistant can cite these">\n${finalContext}\n</search_results>${evidenceNotes ? `\n${evidenceNotes}` : ''}\n<widgets_result noteForAssistant="Its output is already showed to the user, assistant can use this information to answer the query but do not CITE this as a souce">\n${widgetContext}\n</widgets_result>`;
 
     const writerPrompt = getWriterPrompt(
       finalContextWithWidgets,

@@ -99,13 +99,34 @@ export type UploadSearchResultsResearchBlock = {
   results: Chunk[];
 };
 
+// Emitted by a search after passage selection (M3): how many passages were
+// ranked, how many were kept, and from how many distinct sources.
+export type RankingResearchBlock = {
+  id: string;
+  type: 'ranking';
+  candidates: number;
+  selected: number;
+  sources: number;
+};
+
+// Emitted by the evidence-gap round (M3): whether the evidence covers the
+// question, and what the check said is missing.
+export type GapCheckResearchBlock = {
+  id: string;
+  type: 'gap_check';
+  covered: boolean;
+  gaps: string[];
+};
+
 export type ResearchBlockSubStep =
   | ReasoningResearchBlock
   | SearchingResearchBlock
   | SearchResultsResearchBlock
   | ReadingResearchBlock
   | UploadSearchingResearchBlock
-  | UploadSearchResultsResearchBlock;
+  | UploadSearchResultsResearchBlock
+  | RankingResearchBlock
+  | GapCheckResearchBlock;
 
 export type ResearchBlock = {
   id: string;

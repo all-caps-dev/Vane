@@ -7,6 +7,8 @@ import {
   ChevronDown,
   ChevronUp,
   BookSearch,
+  ListOrdered,
+  ClipboardCheck,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useEffect, useState } from 'react';
@@ -25,6 +27,10 @@ const getStepIcon = (step: ResearchBlockSubStep) => {
     return <FileText className="w-4 h-4" />;
   } else if (step.type === 'reading') {
     return <BookSearch className="w-4 h-4" />;
+  } else if (step.type === 'ranking') {
+    return <ListOrdered className="w-4 h-4" />;
+  } else if (step.type === 'gap_check') {
+    return <ClipboardCheck className="w-4 h-4" />;
   }
 
   return null;
@@ -47,6 +53,16 @@ const getStepTitle = (
     return 'Scanning your uploaded documents';
   } else if (step.type === 'upload_search_results') {
     return `Reading ${step.results.length} ${step.results.length === 1 ? 'document' : 'documents'}`;
+  } else if (step.type === 'ranking') {
+    // Real counts from the selection, e.g. "Ranked 48 passages, kept 16 from 5 sources".
+    return `Ranked ${step.candidates} ${step.candidates === 1 ? 'passage' : 'passages'}, kept ${step.selected} from ${step.sources} ${step.sources === 1 ? 'source' : 'sources'}`;
+  } else if (step.type === 'gap_check') {
+    const gaps = Array.isArray(step.gaps) ? step.gaps.length : 0;
+    if (gaps > 0)
+      return `Checked coverage: ${gaps} ${gaps === 1 ? 'gap' : 'gaps'}`;
+    return step.covered
+      ? 'Checked coverage: no gaps'
+      : 'Checked coverage: not fully covered';
   }
 
   return 'Processing';
@@ -208,6 +224,21 @@ const AssistantSteps = ({
                                 </a>
                               );
                             })}
+                          </div>
+                        )}
+
+                      {step.type === 'gap_check' &&
+                        Array.isArray(step.gaps) &&
+                        step.gaps.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5 mt-1.5">
+                            {step.gaps.map((gap, idx) => (
+                              <span
+                                key={idx}
+                                className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-light-100 dark:bg-dark-100 text-black/70 dark:text-white/70 border border-light-200 dark:border-dark-200"
+                              >
+                                {gap}
+                              </span>
+                            ))}
                           </div>
                         )}
 

@@ -238,6 +238,17 @@ export const executeSearch = async (input: SearchInput): Promise<Chunk[]> => {
   const budget =
     input.mode === 'quality' ? Math.round(baseBudget * 1.5) : baseBudget;
 
+  // Shows the UI how many passages were ranked and kept (M3). Real counts
+  // only; nothing is estimated.
+  const reportRanking = (stats: SelectionStats) => {
+    researchBlock.data.subSteps.push({
+      id: crypto.randomUUID(),
+      type: 'ranking',
+      ...stats,
+    });
+    pushSubSteps(input.session, researchBlock);
+  };
+
   const rerank = (stage: string, items: Evidence[], timeoutMs: number) =>
     rerankEvidence({
       stage,
@@ -262,7 +273,7 @@ export const executeSearch = async (input: SearchInput): Promise<Chunk[]> => {
     (input.mode === 'balanced' && getBalancedReadsPages());
 
   if (!readsPages) {
-    return finishSelection(rankedSnippets, budget, trace);
+    return finishSelection(rankedSnippets, budget, trace, reportRanking);
   }
 
   /* ---- 3. Balanced and quality: read the top pages ---- */
@@ -369,7 +380,7 @@ export const executeSearch = async (input: SearchInput): Promise<Chunk[]> => {
     PASSAGE_RERANK_TIMEOUT_MS,
   );
 
-  return finishSelection(rankedPassages, budget, trace);
+  return finishSelection(rankedPassages, budget, trace, reportRanking);
 };
 
 /*
@@ -427,17 +438,28 @@ const rerankEvidence = async (args: {
   return ranked;
 };
 
+// What a selection did, for the UI's 'ranking' step (M3).
+type SelectionStats = { candidates: number; selected: number; sources: number };
+
 // Applies the evidence budget, records 'select' and 'evidence' trace
-// events, and converts the result to the Chunk shape callers expect.
+// events, reports the counts, and converts the result to the Chunk shape
+// callers expect.
 const finishSelection = (
   ranked: Evidence[],
   budget: number,
   trace: Trace,
+  report: (stats: SelectionStats) => void,
 ): Chunk[] => {
   const { selected, distinctSources, droppedDuplicates } = selectEvidence(
     ranked,
     { budget, maxPerSource: MAX_PER_SOURCE, minSources: MIN_SOURCES },
   );
+
+  report({
+    candidates: ranked.length,
+    selected: selected.length,
+    sources: distinctSources,
+  });
 
   trace.event('select', {
     budget,
