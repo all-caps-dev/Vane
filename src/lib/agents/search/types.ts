@@ -5,6 +5,7 @@ import SessionManager from '@/lib/session';
 import { ChatTurnMessage, Chunk } from '@/lib/types';
 import type { SourceGroup } from '@/lib/evidence';
 import type { Prefetch } from './prefetch';
+import type { InternalModelFallback } from '@/lib/models/internalModel';
 
 export type SearchSources = 'web' | 'discussions' | 'academic';
 
@@ -15,7 +16,16 @@ export type SearchAgentConfig = {
   embedding: BaseEmbedding<any>;
   mode: 'speed' | 'balanced' | 'quality';
   systemInstructions: string;
+  // The optional second model for internal calls (classifier, researcher
+  // planner, gap check, widgets). Unset means the chat model serves them.
+  internalLlm?: BaseLLM<any>;
+  // Set when an internal model was configured but could not be used.
+  internalModelFallback?: InternalModelFallback;
 };
+
+// The model for internal calls: the internal model when loaded, else the chat model.
+export const internalLlmOf = (config: SearchAgentConfig): BaseLLM<any> =>
+  config.internalLlm ?? config.llm;
 
 export type SearchAgentInput = {
   chatHistory: ChatTurnMessage[];

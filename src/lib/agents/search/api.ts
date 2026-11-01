@@ -1,11 +1,11 @@
-import { ResearcherOutput, SearchAgentInput } from './types';
+import { internalLlmOf, ResearcherOutput, SearchAgentInput } from './types';
 import SessionManager from '@/lib/session';
 import { classify } from './classifier';
 import Researcher from './researcher';
 import { getWriterPrompt } from '@/lib/prompts/search/writer';
 import { WidgetExecutor } from './widgets';
 import { getTokenCount } from '@/lib/utils/splitText';
-import { Tracer, redactSecrets } from '@/lib/trace';
+import { Tracer, describeModel, redactSecrets } from '@/lib/trace';
 import { startRequestTrace, traceAnswer, traceSources } from './trace';
 import { formatSourcesForWriter } from '@/lib/evidence';
 import { formatEvidenceNotes } from './gapCheck';
@@ -49,13 +49,18 @@ class APISearchAgent {
       trace: tracer,
     });
 
-    const classifySpan = tracer.span('classify');
+    // The classifier, planner, gap check and widgets use the internal
+    // model when one is loaded; the writer always uses the chat model.
+    const internalLlm = internalLlmOf(input.config);
+    const internalModel = describeModel(internalLlm);
+
+    const classifySpan = tracer.span('classify', { model: internalModel });
 
     const classification = await classify({
       chatHistory: input.chatHistory,
       enabledSources: input.config.sources,
       query: input.followUp,
-      llm: input.config.llm,
+      llm: internalLlm,
     });
 
     /* Every classification field, including the M3 freshness, intent and
@@ -66,13 +71,13 @@ class APISearchAgent {
       standaloneFollowUp: tracer.content(classification.standaloneFollowUp),
     });
 
-    const widgetSpan = tracer.span('widgets');
+    const widgetSpan = tracer.span('widgets', { model: internalModel });
 
     const widgetPromise = WidgetExecutor.executeAll({
       classification,
       chatHistory: input.chatHistory,
       followUp: input.followUp,
-      llm: input.config.llm,
+      llm: internalLlm,
     })
       .then((widgetOutputs) => {
         widgetSpan.end({
@@ -151,6 +156,7 @@ class APISearchAgent {
 
     const writeStartedAt = Date.now();
     const writeSpan = tracer.span('write', {
+      model: describeModel(input.config.llm),
       writerPromptTokens: tracer.enabled
         ? getTokenCount(writerPrompt)
         : undefined,

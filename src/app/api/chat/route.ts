@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import ModelRegistry from '@/lib/models/registry';
+import { loadInternalModel } from '@/lib/models/internalModel';
+import { getInternalModelSetting } from '@/lib/config/serverRegistry';
 import { ModelWithProvider } from '@/lib/models/types';
 import SearchAgent from '@/lib/agents/search';
 import SessionManager from '@/lib/session';
@@ -127,12 +129,19 @@ export const POST = async (req: Request) => {
 
     const registry = new ModelRegistry();
 
-    const [llm, embedding] = await Promise.all([
+    /* The internal model (if set) loads once, next to the chat model. It
+       never fails the request: on any problem the chat model serves. */
+    const [llm, embedding, internal] = await Promise.all([
       registry.loadChatModel(body.chatModel.providerId, body.chatModel.key),
       registry.loadEmbeddingModel(
         body.embeddingModel.providerId,
         body.embeddingModel.key,
       ),
+      loadInternalModel({
+        setting: getInternalModelSetting(),
+        chatModel: body.chatModel,
+        registry,
+      }),
     ]);
 
     const history: ChatTurnMessage[] = body.history.map((msg) => {
@@ -223,6 +232,8 @@ export const POST = async (req: Request) => {
           mode: body.optimizationMode,
           fileIds: body.files,
           systemInstructions: body.systemInstructions || 'None',
+          internalLlm: internal.llm,
+          internalModelFallback: internal.fallback,
         },
       })
       .catch((err) => {

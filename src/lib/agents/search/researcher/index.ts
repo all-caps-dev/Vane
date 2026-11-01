@@ -1,9 +1,11 @@
 import {
   ActionOutput,
   EvidenceNotes,
+  internalLlmOf,
   ResearcherInput,
   ResearcherOutput,
 } from '../types';
+import { describeModel } from '@/lib/trace';
 import { ActionRegistry } from './actions';
 import { getResearcherPrompt } from '@/lib/prompts/search/researcher';
 import SessionManager from '@/lib/session';
@@ -77,7 +79,11 @@ class Researcher {
        so executeSearch and the scraper take from the same counters. */
     const budget = RequestBudget.forMode(input.config.mode, trace);
     session.budget = budget;
+    // The tool-calling planner and the gap check use the internal model;
+    // the searches themselves (and the legacy picker) keep the chat model.
+    const plannerLlm = internalLlmOf(input.config);
     const researchSpan = trace.span('research', {
+      model: describeModel(plannerLlm),
       maxIteration,
       tools: availableTools.map((t) => t.name),
       budget: budget.limits,
@@ -143,7 +149,7 @@ class Researcher {
       iterationsRun = i + 1;
       const llmStartedAt = Date.now();
 
-      const actionStream = input.config.llm.streamText({
+      const actionStream = plannerLlm.streamText({
         messages: [
           {
             role: 'system',
@@ -321,7 +327,7 @@ class Researcher {
         const roundStartedAt = Date.now();
 
         const gap = await runGapCheck({
-          llm: input.config.llm,
+          llm: plannerLlm,
           session,
           researchBlock,
           mode: input.config.mode,

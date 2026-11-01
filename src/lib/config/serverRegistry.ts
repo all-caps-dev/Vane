@@ -98,3 +98,10 @@ export const getPrefetchSearch = (): boolean => {
   const value = configManager.getConfig('search.prefetchSearch', true);
   return !(value === false || value === 'false');
 };
+
+/* ---------- Internal model (Fleet #346) ---------- */
+
+// The raw setting: 'same' (or empty) for the chat model, else providerId:key.
+// Parsed and validated by loadInternalModel (models/internalModel.ts).
+export const getInternalModelSetting = (): string =>
+  String(configManager.getConfig('search.internalModel', '') ?? '').trim();

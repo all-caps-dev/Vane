@@ -216,6 +216,20 @@ class ConfigManager {
         scope: 'server',
         env: 'VANE_PREFETCH_SEARCH',
       },
+      {
+        name: 'Internal model',
+        key: 'internalModel',
+        type: 'select',
+        // Filled with every configured chat model when the settings are
+        // read (GET /api/config); stored as providerId:key.
+        options: [{ name: 'Same as chat model', value: 'same' }],
+        required: false,
+        description:
+          'A second chat model for the classifier, query planning, coverage check and widgets. The answer is always written by the chat model you pick in the chat. If this model cannot be loaded, the chat model is used.',
+        default: 'same',
+        scope: 'server',
+        env: 'VANE_INTERNAL_MODEL',
+      },
     ],
   };
 

@@ -267,6 +267,19 @@ New trace event `prefetch`, one `started` and at most one outcome per request:
 
 The prefetched query also writes its own `search.query` event, so a discarded prefetch still appears there.
 
+## Internal model (Fleet #346 item 3)
+
+Vane used one chat model for every call of a request. An optional second model now serves the internal calls: the classifier, the researcher loop's tool-calling planner (`streamText`), the gap check and the weather, stock and calculation widgets. The writer's answer, and the legacy picker and extractor (quality mode with reranker `off`), keep the chat model picked in the chat.
+
+- **Setting** (server scope): Settings, Search, **Internal model**, key `internalModel`, environment variable `VANE_INTERNAL_MODEL`, default `same` ("Same as chat model"). The value is `providerId:key`; the key may itself contain `:` (the first one splits). The select lists every chat model configured when the settings dialog opens: `GET /api/config` fills its options from the same live model list `/api/providers` returns, so no UI component changed. A saved model that is no longer configured stays in the list marked "(not available)". Like the other select settings, the environment variable applies only while no value is saved.
+- **Loading.** Both `/api/chat` and `/api/search` load it once per request, in parallel with the chat and embedding models (`src/lib/models/internalModel.ts`). A value equal to the chat model loads nothing. A malformed value or a failed load never fails the request: the chat model serves, one `[internal model]` line is logged, and the trace records it.
+
+New trace fields:
+
+- `request` event: `internalModel` (`impl` and `key` of the model serving internal calls) and `internalModelSource` (`internal` or `chat`).
+- `internalModel.fallback` event: `requested` (the setting), `reason` (`invalid` or `load_failed`) and `error`.
+- `model` attribute on the `classify`, `widgets` and `research` spans (the research span covers the planner and the gap check) and on the `write` span (always the chat model).
+
 ## Run the tests
 
 ```

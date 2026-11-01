@@ -1,7 +1,8 @@
 import configManager from '@/lib/config';
 import ModelRegistry from '@/lib/models/registry';
 import { NextRequest, NextResponse } from 'next/server';
-import { ConfigModelProvider } from '@/lib/config/types';
+import { ConfigModelProvider, UIConfigSections } from '@/lib/config/types';
+import { internalModelOptions } from '@/lib/models/internalModel';
 
 type SaveConfigBody = {
   key: string;
@@ -11,7 +12,10 @@ type SaveConfigBody = {
 export const GET = async (req: NextRequest) => {
   try {
     const values = configManager.getCurrentConfig();
-    const fields = configManager.getUIConfigSections();
+    // A copy, because the internal model's options are filled per request.
+    const fields: UIConfigSections = structuredClone(
+      configManager.getUIConfigSections(),
+    );
 
     const modelRegistry = new ModelRegistry();
     const modelProviders = await modelRegistry.getActiveProviders();
@@ -27,6 +31,20 @@ export const GET = async (req: NextRequest) => {
             activeProvider?.embeddingModels ?? mp.embeddingModels,
         };
       },
+    );
+
+    /* The internal model select lists every chat model configured right
+       now, as providerId:key (the same list /api/providers returns). */
+    fields.search = fields.search.map((f) =>
+      f.key === 'internalModel' && f.type === 'select'
+        ? {
+            ...f,
+            options: internalModelOptions(
+              modelProviders,
+              values.search?.internalModel,
+            ),
+          }
+        : f,
     );
 
     return NextResponse.json({
