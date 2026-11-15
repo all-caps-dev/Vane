@@ -26,6 +26,18 @@ type Entry = {
 // Map order is use order: the first key is the least recently used.
 const pipelines = new Map<string, Entry>();
 
+/* The library is imported once, on first use, and every later load reuses
+   that promise. Importing it again for each new model raced in tests: two
+   loads in flight together could get the real module past vi.mock. A
+   failed import is forgotten so the next load tries again. */
+let transformers: Promise<typeof import('@huggingface/transformers')> | null =
+  null;
+const loadTransformers = () =>
+  (transformers ??= import('@huggingface/transformers').catch((err) => {
+    transformers = null;
+    throw err;
+  }));
+
 // Frees an evicted pipeline's ONNX session once it is idle.
 const disposeIfIdle = (entry: Entry) => {
   if (!entry.evicted || entry.inUse > 0) return;
@@ -40,7 +52,7 @@ const acquire = (model: string): Entry => {
     pipelines.delete(model);
   } else {
     const pipeline = (async () => {
-      const { pipeline } = await import('@huggingface/transformers');
+      const { pipeline } = await loadTransformers();
       const result = await pipeline('feature-extraction', model, {
         dtype: 'fp32',
       });

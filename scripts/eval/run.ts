@@ -8,6 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const USAGE = `Vane eval runner
 
@@ -106,6 +107,147 @@ const scanCitations = (answer: string, sourceCount: number): CitationStats => {
 
 // The writer prompt's "no information" phrase (src/lib/prompts/search/writer.ts).
 const ABSTAIN_PATTERN = /could not find/i;
+
+/*
+  Required facts are whole sentences written for the judge ("Proxmox VE 9.0
+  was released in August 2025"), so matching the sentence as a substring
+  almost never hits, even when the answer is right. A fact counts as stated
+  when its key terms are in the answer:
+  - exact terms, every one needed: numbers and versions (9.0, 2.4.13,
+    $3,999), quoted names ("Trixie"), command flags (--jinja) and code-like
+    tokens (search.formats, role=combobox, GB/s);
+  - name terms, at least two thirds needed: capitalised words (Debian,
+    Funnel), counting the first word only when it is an acronym (ZHA).
+  Number words zero to twenty match their digits ("nine" for 9). A fact with
+  no key terms ("Does not invent a requirement") cannot be checked this way:
+  factTerms returns null and the fact is left to the judge.
+*/
+const NUMBER_WORDS = [
+  'zero',
+  'one',
+  'two',
+  'three',
+  'four',
+  'five',
+  'six',
+  'seven',
+  'eight',
+  'nine',
+  'ten',
+  'eleven',
+  'twelve',
+  'thirteen',
+  'fourteen',
+  'fifteen',
+  'sixteen',
+  'seventeen',
+  'eighteen',
+  'nineteen',
+  'twenty',
+];
+
+// Capitalised words that start a clause, not names.
+const NOT_NAMES = new Set([
+  'A',
+  'An',
+  'The',
+  'It',
+  'If',
+  'I',
+  'On',
+  'For',
+  'When',
+  'Yes',
+  'No',
+  'Turn',
+  'Says',
+  'States',
+  'Notes',
+  'Names',
+  'Mentions',
+  'Points',
+  'Flags',
+  'Cites',
+  'Does',
+  'Lists',
+  'Uses',
+  'Add',
+  'Route',
+  'Without',
+]);
+
+export type FactTerms = { exact: string[]; names: string[] };
+
+// 3,999 -> 3999, so "$3,999" in a fact matches "$3999" in an answer.
+const dropDigitCommas = (text: string): string =>
+  text.replace(/(\d),(?=\d{3}(?!\d))/g, '$1');
+
+export const factTerms = (fact: string): FactTerms | null => {
+  const text = fact.replace(/^Turn \d+:\s*/i, '');
+  const exact: string[] = [];
+  const names: string[] = [];
+
+  for (const m of text.matchAll(/"([^"]+)"/g)) exact.push(m[1]);
+
+  const tokens = text
+    .replace(/"[^"]*"/g, ' ')
+    // A comma splits terms unless it sits between digits (3,999).
+    .split(/[\s;()]+|,(?!\d)/)
+    .filter(Boolean);
+
+  tokens.forEach((raw, i) => {
+    const token = raw.replace(/^[$~'’]+|[.:'’!?]+$/g, '');
+    if (!token) return;
+    if (
+      /^--?[a-z]/i.test(token) ||
+      /\d/.test(token) ||
+      /[a-z0-9][._=/][a-z0-9]/i.test(token)
+    ) {
+      exact.push(dropDigitCommas(token));
+    } else if (/^[A-Z]/.test(token) && !NOT_NAMES.has(token)) {
+      // The first word is capitalised anyway; keep it only if it is an
+      // acronym or CamelCase.
+      if (i > 0 || /^[A-Z]{2,}$|[a-z][A-Z]/.test(token)) names.push(token);
+    }
+  });
+
+  return exact.length > 0 || names.length > 0 ? { exact, names } : null;
+};
+
+const escapeRegExp = (text: string): string =>
+  text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// True when `term` appears in `text` as a whole term, ignoring case.
+const hasTerm = (text: string, term: string): boolean => {
+  const lower = term.toLowerCase();
+  const variants = [escapeRegExp(lower)];
+  if (/^\d+$/.test(lower) && Number(lower) <= 20)
+    variants.push(NUMBER_WORDS[Number(lower)]);
+  // No letter, digit or dot right before; no letter, digit or ".digit"
+  // right after, so 2.4.1 does not match inside 2.4.11.
+  const pattern = new RegExp(
+    `(?<![\\w.])(?:${variants.join('|')})(?![\\w]|\\.\\d)`,
+    'i',
+  );
+  return pattern.test(text);
+};
+
+/*
+  true when the answers state the fact, false when they do not, null when
+  the fact has no key terms to check (judge only).
+*/
+export const factStated = (fact: string, answers: string): boolean | null => {
+  const text = dropDigitCommas(answers);
+  if (text.toLowerCase().includes(fact.toLowerCase())) return true;
+
+  const terms = factTerms(fact);
+  if (!terms) return null;
+  if (!terms.exact.every((t) => hasTerm(text, t))) return false;
+  if (terms.names.length === 0) return true;
+
+  const found = terms.names.filter((t) => hasTerm(text, t)).length;
+  return found >= Math.ceil((terms.names.length * 2) / 3);
+};
 
 const parseArgs = (argv: string[]): Args => {
   const args: Args = {
@@ -379,14 +521,18 @@ const runFixture = async (
 
     // Required facts are matched against every turn's answer joined, because
     // a multi-turn fixture's facts are spread across turns ("Turn 1: ...").
-    const allAnswers = done
-      .map((t) => t.answer ?? '')
-      .join('\n\n')
-      .toLowerCase();
-    const misses = fixture.requiredFacts.filter(
-      (fact) => !allAnswers.includes(String(fact).toLowerCase()),
-    );
-    const factHits = fixture.requiredFacts.length - misses.length;
+    // Facts with no key terms are left to the judge (see factStated).
+    const allAnswers = done.map((t) => t.answer ?? '').join('\n\n');
+    const verdicts = fixture.requiredFacts.map((fact) => ({
+      fact: String(fact),
+      stated: factStated(String(fact), allAnswers),
+    }));
+    const checked = verdicts.filter((v) => v.stated !== null);
+    const misses = checked.filter((v) => !v.stated).map((v) => v.fact);
+    const judgeOnly = verdicts
+      .filter((v) => v.stated === null)
+      .map((v) => v.fact);
+    const factHits = checked.length - misses.length;
 
     const domains = fixture.acceptableSourceDomains
       .map(normaliseDomain)
@@ -409,15 +555,14 @@ const runFixture = async (
       answerChars: answer.length,
       sourceCount: scored.sources.length,
       citations: scanCitations(answer, scored.sources.length),
+      // total counts only the facts that could be checked.
       requiredFacts: {
         hits: factHits,
-        total: fixture.requiredFacts.length,
+        total: checked.length,
         misses,
+        judgeOnly,
       },
-      factHitRate:
-        fixture.requiredFacts.length > 0
-          ? factHits / fixture.requiredFacts.length
-          : null,
+      factHitRate: checked.length > 0 ? factHits / checked.length : null,
       acceptableDomainHits: matchedSources.length,
       matchedDomains: matchedSources.map((s) => hostnameOf(s.metadata?.url)),
       abstained,
@@ -563,6 +708,9 @@ const renderHtml = (
       const misses = ok.requiredFacts.misses.length
         ? `<div class="muted">missed: ${escapeHtml(ok.requiredFacts.misses.join('; '))}</div>`
         : '';
+      const judgeOnly = ok.requiredFacts.judgeOnly?.length
+        ? `<div class="muted">judge only: ${ok.requiredFacts.judgeOnly.length}</div>`
+        : '';
       const sourcesList = ok.sources
         .map(
           (s, i) =>
@@ -575,7 +723,7 @@ const renderHtml = (
 <td>${fmt(ok.latencyMs)} ms</td>
 <td>${ok.sourceCount}</td>
 <td class="${citesBad ? 'bad' : ''}">${citesOk} ok / ${citesBad} bad</td>
-<td>${ok.requiredFacts.hits}/${ok.requiredFacts.total}${misses}</td>
+<td>${ok.requiredFacts.hits}/${ok.requiredFacts.total}${misses}${judgeOnly}</td>
 <td>${ok.acceptableDomainHits}</td>
 </tr>
 <tr class="answer"><td colspan="7"><p>${escapeHtml(preview)}${ok.answer.length > 300 ? '…' : ''}</p>
@@ -709,7 +857,13 @@ const main = async () => {
   console.log(`Wrote ${jsonlPath}\nWrote ${htmlPath}`);
 };
 
-main().catch((err) => {
-  console.error(err instanceof Error ? err.message : err);
-  process.exit(1);
-});
+// Run only as a script, not when a test imports factStated.
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href
+) {
+  main().catch((err) => {
+    console.error(err instanceof Error ? err.message : err);
+    process.exit(1);
+  });
+}
