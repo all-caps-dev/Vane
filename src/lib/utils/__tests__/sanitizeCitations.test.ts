@@ -62,4 +62,44 @@ describe('sanitizeCitations', () => {
   it('handles empty input', () => {
     expect(sanitizeCitations('', 3)).toEqual({ text: '', removed: [] });
   });
+  // Cases raised by the upstream review bot on ItzCrazyKns/Vane#1227.
+  it('protects inline code with more than one backtick', () => {
+    const answer = 'Use ``a[9] ` b`` here [9].';
+    expect(sanitizeCitations(answer, 1)).toEqual({
+      text: 'Use ``a[9] ` b`` here.',
+      removed: [9],
+    });
+  });
+
+  it('does not close a fence at a ``` inside a code line', () => {
+    const answer = '```md\nx ``` arr[9]\ny[8]\n```\nAfter [9].';
+    expect(sanitizeCitations(answer, 1)).toEqual({
+      text: '```md\nx ``` arr[9]\ny[8]\n```\nAfter.',
+      removed: [9],
+    });
+  });
+
+  it('honours longer fences and tilde fences', () => {
+    const answer = '````\n```\na[9]\n```\n````\n~~~\nb[9]\n~~~\nEnd [9].';
+    expect(sanitizeCitations(answer, 1).text).toBe(
+      '````\n```\na[9]\n```\n````\n~~~\nb[9]\n~~~\nEnd.',
+    );
+  });
+
+  it('leaves link destinations and link text alone', () => {
+    const answer = 'See [the [9] page](https://x.test/a[9]b) and [9].';
+    expect(sanitizeCitations(answer, 1)).toEqual({
+      text: 'See [the [9] page](https://x.test/a[9]b) and.',
+      removed: [9],
+    });
+  });
+
+  it('leaves reference links whose label is defined', () => {
+    const answer =
+      'Read [the docs][12] or [12]. Fake [9].\n\n[12]: https://x.test';
+    expect(sanitizeCitations(answer, 1)).toEqual({
+      text: 'Read [the docs][12] or [12]. Fake.\n\n[12]: https://x.test',
+      removed: [9],
+    });
+  });
 });
