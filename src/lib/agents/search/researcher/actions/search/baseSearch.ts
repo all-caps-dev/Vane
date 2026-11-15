@@ -582,9 +582,14 @@ const legacyQualitySearch = async (
     }
   });
 
-  const filteredResults = pickedResults.filter(
-    (r) => !alreadyExtractedURLs.has(normalizeUrl(r.metadata.url)),
-  );
+  const filteredResults = pickedResults.filter((r) => {
+    // Record each accepted key as we go, so two variants of one page
+    // picked in the same batch are read once.
+    const key = normalizeUrl(r.metadata.url);
+    if (alreadyExtractedURLs.has(key)) return false;
+    alreadyExtractedURLs.add(key);
+    return true;
+  });
 
   pickSpan.end({
     pickedCount: pickedResults.length,
