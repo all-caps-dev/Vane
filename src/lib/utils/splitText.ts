@@ -44,7 +44,8 @@ export const splitText = (
 
     /* A single segment larger than maxTokens never fits. Put it in a chunk
        on its own so the loop always moves forward (it used to spin forever). */
-    if (chunkEnd === chunkStart) {
+    const oversized = chunkEnd === chunkStart;
+    if (oversized) {
       chunkEnd = chunkStart + 1;
     }
 
@@ -63,7 +64,10 @@ export const splitText = (
       overlapBeforeStart--;
     }
 
-    const overlapStartIndex = Math.max(0, overlapBeforeStart + 1);
+    // An oversized segment is already over budget: no overlap in front of it.
+    const overlapStartIndex = oversized
+      ? chunkStart
+      : Math.max(0, overlapBeforeStart + 1);
 
     const overlapBeforeContent = segments
       .slice(overlapStartIndex, chunkStart)

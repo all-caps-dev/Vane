@@ -66,4 +66,11 @@ describe('splitText with an oversized segment', () => {
     expect(chunks.some((c) => c.includes(giant))).toBe(true);
     expect(chunks[chunks.length - 1]).toContain('Short end.');
   });
+  it('puts no overlap in front of an oversized segment', () => {
+    const short = 'Short one. ';
+    const huge = 'word '.repeat(400).trim();
+    const chunks = splitText(short + huge, 50, 20);
+    const hugeChunk = chunks.find((c) => c.includes('word word'));
+    expect(hugeChunk?.startsWith('word')).toBe(true);
+  });
 });
