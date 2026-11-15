@@ -34,6 +34,54 @@ export const thinkingBody = (
     ? { chat_template_kwargs: { thinking: false } }
     : {};
 
+/*
+  True when the server answered 400 because it does not support
+  response_format (structured output). TensorFold's DeepSeek V4.1 engine says
+  "structured output (response_format and the guided_* fields) is not
+  supported by this engine yet"; vLLM-style servers name response_format or
+  json_schema.
+*/
+export const isStructuredOutputUnsupported = (err: unknown): boolean => {
+  const e = err as { status?: number; message?: string } | null;
+  return (
+    e?.status === 400 &&
+    /structured output|response_format|guided_|json_schema/i.test(
+      e.message ?? '',
+    )
+  );
+};
+
+/*
+  Servers (baseURL + model) known to reject response_format. A new OpenAILLM
+  is made for every request, so this lives at module level: only the first
+  request after a restart pays for the rejected call.
+*/
+const noStructuredOutput = new Set<string>();
+
+/*
+  The messages with an instruction to answer in JSON matching `schema`, for
+  servers without response_format. The instruction joins the first system
+  message (chat templates such as DeepSeek's expect one system message, at
+  the start), or becomes that message when there is none.
+*/
+export const withSchemaInstruction = (
+  messages: ChatCompletionMessageParam[],
+  schema: z.ZodTypeAny,
+): ChatCompletionMessageParam[] => {
+  const instruction =
+    'Reply with only a JSON object that matches this JSON Schema. No prose, no code fence.\n' +
+    JSON.stringify(z.toJSONSchema(schema));
+  const [first, ...rest] = messages;
+
+  if (first?.role === 'system' && typeof first.content === 'string') {
+    return [
+      { role: 'system', content: `${first.content}\n\n${instruction}` },
+      ...rest,
+    ];
+  }
+  return [{ role: 'system', content: instruction }, ...messages];
+};
+
 type OpenAIConfig = {
   apiKey: string;
   model: string;
@@ -222,33 +270,64 @@ class OpenAILLM extends BaseLLM<OpenAIConfig> {
   }
 
   async generateObject<T>(input: GenerateObjectInput): Promise<T> {
-    // One retry if the server could not be reached (see connectionRetry.ts).
-    const response = await retryOnceOnConnectionError(
-      () =>
-        this.openAIClient.chat.completions.parse({
-          messages: this.convertToOpenAIMessages(input.messages),
-          model: this.config.model,
-          temperature:
-            input.options?.temperature ??
-            this.config.options?.temperature ??
-            1.0,
-          top_p: input.options?.topP ?? this.config.options?.topP,
-          max_completion_tokens:
-            input.options?.maxTokens ?? this.config.options?.maxTokens,
-          stop:
-            input.options?.stopSequences ?? this.config.options?.stopSequences,
-          frequency_penalty:
-            input.options?.frequencyPenalty ??
-            this.config.options?.frequencyPenalty,
-          presence_penalty:
-            input.options?.presencePenalty ??
-            this.config.options?.presencePenalty,
-          response_format: zodResponseFormat(input.schema, 'object'),
-          // The SDK types do not know this key; the cast lets it through to the body.
-          ...(thinkingBody(input.options) as {}),
-        }),
-      'OpenAI generateObject',
-    );
+    const serverKey = `${this.config.baseURL ?? ''}|${this.config.model}`;
+    const messages = this.convertToOpenAIMessages(input.messages);
+
+    // The sampling fields shared by both request shapes below.
+    const params = {
+      model: this.config.model,
+      temperature:
+        input.options?.temperature ?? this.config.options?.temperature ?? 1.0,
+      top_p: input.options?.topP ?? this.config.options?.topP,
+      max_completion_tokens:
+        input.options?.maxTokens ?? this.config.options?.maxTokens,
+      stop: input.options?.stopSequences ?? this.config.options?.stopSequences,
+      frequency_penalty:
+        input.options?.frequencyPenalty ??
+        this.config.options?.frequencyPenalty,
+      presence_penalty:
+        input.options?.presencePenalty ?? this.config.options?.presencePenalty,
+      // The SDK types do not know this key; the cast lets it through to the body.
+      ...(thinkingBody(input.options) as {}),
+    };
+
+    /* Without response_format: the schema goes into the prompt instead, and
+       repairJson below pulls the object out of the reply. Same model, same
+       settings; only the request shape changes. */
+    const promptForJson = () =>
+      retryOnceOnConnectionError(
+        () =>
+          this.openAIClient.chat.completions.create({
+            ...params,
+            messages: withSchemaInstruction(messages, input.schema),
+          }),
+        'OpenAI generateObject (schema in prompt)',
+      );
+
+    let response;
+    if (noStructuredOutput.has(serverKey)) {
+      response = await promptForJson();
+    } else {
+      try {
+        // One retry if the server could not be reached (see connectionRetry.ts).
+        response = await retryOnceOnConnectionError(
+          () =>
+            this.openAIClient.chat.completions.parse({
+              ...params,
+              messages,
+              response_format: zodResponseFormat(input.schema, 'object'),
+            }),
+          'OpenAI generateObject',
+        );
+      } catch (err) {
+        if (!isStructuredOutputUnsupported(err)) throw err;
+        noStructuredOutput.add(serverKey);
+        console.warn(
+          `OpenAI generateObject: ${this.config.model} at ${this.config.baseURL} rejects response_format; putting the schema in the prompt from now on`,
+        );
+        response = await promptForJson();
+      }
+    }
 
     if (response.choices && response.choices.length > 0) {
       try {
