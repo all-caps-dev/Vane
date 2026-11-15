@@ -13,7 +13,7 @@ Follow every rule below exactly. Where a rule and your own sense of the answer d
    - `error`: when it is not null, the fixture did not finish.
 3. **The output path** for your JSONL.
 
-Ignore `requiredFacts.hits`, `factHitRate` and `abstained` in the results. They are substring smoke signals, not grades.
+Ignore `requiredFacts.hits`, `factHitRate` and `abstained` in the results. They are key-term smoke signals, not grades.
 
 ## What to read for each answer
 

@@ -340,7 +340,7 @@ Each run writes two files to `--out`:
 - `results-<mode>-<UTC stamp>.jsonl`: one line per fixture with every turn's question, answer, sources and latency, then the final turn's latency, source count, citation stats, required-fact hits and misses, acceptable-domain hits, whether the answer abstained ("could not find"), any error, and the raw answer and sources. `needsHumanCheck: true` is copied from the fixture when set.
 - `summary-<mode>-<UTC stamp>.html`: one self-contained page. The summary table gives mean and p95 latency, mean source count, the share of answers citing a source number that does not exist, the mean required-fact hit rate, the abstain count and errors. Below it, one row per fixture; open "Full answer and sources" to see the whole answer.
 
-Fact hits are case-insensitive substring matches, so treat them as a smoke signal, not a grade.
+Fact hits match key terms, not whole sentences (`factStated` in `scripts/eval/run.ts`). Every number, version, quoted name, command flag and code-like token in the fact must appear in the answers (as a whole term, so 2.4.1 does not match inside 2.4.11; "nine" counts as 9; 3,999 equals 3999), and at least two thirds of its capitalised names. A fact with none of these ("Does not invent a requirement") is listed under `requiredFacts.judgeOnly` and left out of `total` and the hit rate. Treat hits as a smoke signal, not a grade. Checked on 2026-11-15 against the judged 2026-10-31 runs: the old substring match found 0 or 1 facts in every run, the key-term match puts the six runs in the judge's order (baseline < M3 < M4 in both modes) but agrees only loosely fixture by fixture (Pearson 0.17 to 0.52).
 
 ## Comparing runs
 
@@ -373,7 +373,7 @@ The first `--run` is the baseline. The page has three sections:
 
 ## Judging runs with an agent
 
-Substring fact hits are a smoke signal. The grade comes from a judge: a separate agent run that reads the fixtures and the answers and writes the judge JSONL above.
+Key-term fact hits are a smoke signal. The grade comes from a judge: a separate agent run that reads the fixtures and the answers and writes the judge JSONL above.
 
 - `scripts/eval/JUDGE.md` is the rule book: how `factScore` is built (per-fact 1, 0.5 or 0, averaged; version-and-date facts need both; abstain fixtures score 1.0 for "could not find or confirm", 0.5 for an adjacent answer that never confirms, 0.0 for describing the thing as real), what counts as an unsupported claim, `citedWrongly`, the one-sentence notes against a Perplexity-grade answer, the consistency rules across runs, and the exact output shape. It also says which fixture notes call for a run-day check of a live page.
 - `scripts/eval/judge-template.md` is the prompt to paste into the judge: fill in the repository path, the fixtures path, each results file with its label, the output path and the date.
